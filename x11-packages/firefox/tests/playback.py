@@ -33,12 +33,14 @@ async function run() {
   events.push({stage:'seeked',...snapshot()}); await v.play();
   await new Promise(r=>setTimeout(r,2000)); v.pause();
   events.push({stage:'replayed',...snapshot()});
-  const capture=event('seeked'); v.currentTime=4; await capture;
+  const capture=event('seeked');
+  const frameShown=new Promise(resolve=>v.requestVideoFrameCallback((now,metadata)=>resolve(metadata.mediaTime)));
+  v.currentTime=4; await capture; const mediaTime=await frameShown;
   const c=document.createElement('canvas'); c.width=320;c.height=180;
   c.getContext('2d').drawImage(v,0,0,c.width,c.height);
   const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
   let lo=255,hi=0; for(let i=0;i<pixels.length;i++)if(i%4!=3){lo=Math.min(lo,pixels[i]);hi=Math.max(hi,pixels[i]);}
-  events.push({stage:'capture',...snapshot(),pixelRange:hi-lo,frame:c.toDataURL()});
+  events.push({stage:'capture',...snapshot(),mediaTime,pixelRange:hi-lo,frame:c.toDataURL()});
   document.querySelector('#status').textContent=JSON.stringify(events,null,2);
   await fetch('/result',{method:'POST',body:JSON.stringify({events})});
 }

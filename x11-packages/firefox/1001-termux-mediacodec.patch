@@ -178,6 +178,15 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
+@@ -2470,7 +2513,7 @@
+   return FFmpegDataDecoder::ProcessFlush();
+ }
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
+ Maybe<MediaDataDecoder::PropertyValue> FFmpegVideoDecoder<
+     LIBAV_VER>::GetDecodeProperty(MediaDataDecoder::PropertyName aName) const {
+   // If we are using a software decoder, then we aren't subject to platform
 @@ -2543,6 +2586,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
@@ -323,6 +332,15 @@
  namespace layers {
  class AndroidImageReader;
  class BufferRecycleBin;
+@@ -125,7 +126,7 @@
+ #endif
+   }
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
+   Maybe<MediaDataDecoder::PropertyValue> GetDecodeProperty(
+       MediaDataDecoder::PropertyName aName) const override;
+ #endif
 @@ -226,20 +227,28 @@
    std::atomic<uint8_t> mNumOfHWTexturesInUse{0};
  #endif
@@ -356,7 +374,7 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,498 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -375,9 +393,11 @@
 +#include <sys/socket.h>
 +#include <unistd.h>
 +
++#include <array>
 +#include <chrono>
 +#include <condition_variable>
 +#include <mutex>
++#include <thread>
 +
 +#include "mozilla/Logging.h"
 +#include "mozilla/ScopeExit.h"
@@ -395,35 +415,35 @@
 +  X(AHardwareBuffer_release)  \
 +  X(AHardwareBuffer_describe) \
 +  X(AHardwareBuffer_sendHandleToUnixSocket) X(ANativeWindow_acquire)
-+#define MEDIA_FUNCTIONS(X)                                               \
-+  X(AImageReader_newWithUsage)                                           \
-+  X(AImageReader_delete)                                                 \
-+  X(AImageReader_getWindow)                                              \
-+  X(AImageReader_setImageListener) X(AImageReader_acquireNextImageAsync) \
-+      X(AImage_deleteAsync) X(AImage_getHardwareBuffer) X(AImage_getCropRect)
-+#define EGL_FUNCTIONS(X)                                           \
-+  X(eglGetDisplay)                                                 \
-+  X(eglInitialize)                                                 \
-+  X(eglChooseConfig)                                               \
-+  X(eglCreateContext) X(eglCreatePbufferSurface) X(eglMakeCurrent) \
-+      X(eglDestroyContext) X(eglDestroySurface) X(eglTerminate)    \
-+          X(eglGetProcAddress) X(eglGetError)
-+#define GL_FUNCTIONS(X)                                                        \
-+  X(glGenTextures)                                                             \
-+  X(glBindTexture)                                                             \
-+  X(glTexParameteri)                                                           \
-+  X(glDeleteTextures) X(glGenFramebuffers) X(glBindFramebuffer)                \
-+      X(glFramebufferTexture2D) X(glCheckFramebufferStatus)                    \
-+          X(glDeleteFramebuffers) X(glCreateShader) X(glShaderSource)          \
-+              X(glCompileShader) X(glGetShaderiv) X(glDeleteShader)            \
-+                  X(glCreateProgram) X(glAttachShader) X(glBindAttribLocation) \
-+                      X(glLinkProgram) X(glGetProgramiv) X(glDeleteProgram)    \
-+                          X(glUseProgram) X(glViewport)                        \
-+                              X(glVertexAttribPointer)                         \
-+                                  X(glEnableVertexAttribArray) X(glDrawArrays) \
-+                                      X(glFinish) X(glFlush) X(glGetError)     \
-+                                          X(glGetUniformLocation)              \
-+                                              X(glUniform4f)
++#define MEDIA_FUNCTIONS(X)                                    \
++  X(AImageReader_newWithUsage)                                \
++  X(AImageReader_delete)                                      \
++  X(AImageReader_getWindow)                                   \
++  X(AImageReader_setImageListener)                            \
++  X(AImageReader_acquireNextImageAsync) X(AImage_deleteAsync) \
++      X(AImage_getHardwareBuffer) X(AImage_getCropRect)
++#define EGL_FUNCTIONS(X)                                            \
++  X(eglGetDisplay)                                                  \
++  X(eglInitialize)                                                  \
++  X(eglChooseConfig)                                                \
++  X(eglCreateContext)                                               \
++  X(eglCreatePbufferSurface) X(eglMakeCurrent) X(eglDestroyContext) \
++      X(eglDestroySurface) X(eglTerminate) X(eglGetProcAddress) X(eglGetError)
++#define GL_FUNCTIONS(X)                                                      \
++  X(glGenTextures)                                                           \
++  X(glBindTexture)                                                           \
++  X(glTexParameteri)                                                         \
++  X(glDeleteTextures)                                                        \
++  X(glGenFramebuffers) X(glBindFramebuffer) X(glFramebufferTexture2D)        \
++      X(glCheckFramebufferStatus) X(glDeleteFramebuffers) X(glCreateShader)  \
++          X(glShaderSource) X(glCompileShader) X(glGetShaderiv)              \
++              X(glDeleteShader) X(glCreateProgram) X(glAttachShader)         \
++                  X(glBindAttribLocation) X(glLinkProgram) X(glGetProgramiv) \
++                      X(glDeleteProgram) X(glUseProgram) X(glViewport)       \
++                          X(glVertexAttribPointer)                           \
++                              X(glEnableVertexAttribArray) X(glDrawArrays)   \
++                                  X(glFinish) X(glFlush) X(glGetError)       \
++                                      X(glGetUniformLocation) X(glUniform4f)
 +
 +struct TermuxMediaCodecSurface::Impl {
 +  // Function signatures are explicit because this package targets API 24.
@@ -475,6 +495,13 @@
 +  GLuint program = 0;
 +  std::mutex mutex;
 +  std::condition_variable available;
++  struct OutputSlot {
++    AHardwareBuffer* buffer = nullptr;
++    AHardwareBuffer_Desc desc{};
++    UniqueFileHandle fd;
++    RefPtr<DMABufSurfaceRGBA> lastSurface;
++  };
++  std::array<OutputSlot, 4> outputs;
 +
 +  bool Load() {
 +    android = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
@@ -629,6 +656,9 @@
 +
 +  ~Impl() {
 +    if (reader) fAImageReader_delete(reader);
++    for (auto& slot : outputs) {
++      if (slot.buffer) fAHardwareBuffer_release(slot.buffer);
++    }
 +    if (context != EGL_NO_CONTEXT && Current()) {
 +      if (program) fglDeleteProgram(program);
 +      feglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -732,11 +762,39 @@
 +               AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
 +               AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
 +               AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
-+  AHardwareBuffer* output = nullptr;
-+  if (m->fAHardwareBuffer_allocate(&desc, &output)) return nullptr;
-+  auto releaseOutput =
-+      MakeScopeExit([&] { m->fAHardwareBuffer_release(output); });
-+  m->fAHardwareBuffer_describe(output, &desc);
++  Impl::OutputSlot* slot = nullptr;
++  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
++  do {
++    for (auto& candidate : m->outputs) {
++      if (!candidate.lastSurface || !candidate.lastSurface->IsGlobalRefSet()) {
++        slot = &candidate;
++        break;
++      }
++    }
++    if (slot) break;
++    std::this_thread::sleep_for(std::chrono::milliseconds(1));
++  } while (std::chrono::steady_clock::now() < deadline);
++  if (!slot) {
++    LOG("RGBA output pool is still in use");
++    return nullptr;
++  }
++  slot->lastSurface = nullptr;
++  if (slot->buffer &&
++      (slot->desc.width != desc.width || slot->desc.height != desc.height)) {
++    m->fAHardwareBuffer_release(slot->buffer);
++    slot->buffer = nullptr;
++    slot->fd.reset();
++  }
++  if (!slot->buffer) {
++    if (m->fAHardwareBuffer_allocate(&desc, &slot->buffer)) return nullptr;
++    m->fAHardwareBuffer_describe(slot->buffer, &slot->desc);
++    slot->fd.reset(m->ExportFd(slot->buffer));
++    LOG("Allocated RGBA pool slot {} {}x{}", slot - m->outputs.data(), aWidth,
++        aHeight);
++  }
++  if (!slot->fd) return nullptr;
++  AHardwareBuffer* output = slot->buffer;
++  desc = slot->desc;
 +  EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
 +  EGLImageKHR src =
 +      m->createImage(m->display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
@@ -800,7 +858,7 @@
 +    return nullptr;
 +  }
 +  if (m->fglGetError() != GL_NO_ERROR) return nullptr;
-+  UniqueFileHandle fd(m->ExportFd(output));
++  UniqueFileHandle fd(dup(slot->fd.get()));
 +  if (!fd) {
 +    LOG("RGBA AHardwareBuffer has no dma-buf fd");
 +    return nullptr;
@@ -808,6 +866,7 @@
 +  // Android RGBA byte order is DRM ABGR8888 on little-endian AArch64.
 +  RefPtr<DMABufSurfaceRGBA> surface = DMABufSurfaceRGBA::CreateFromBuffer(
 +      std::move(fd), std::move(fence), aWidth, aHeight, desc.stride * 4);
++  slot->lastSurface = surface;
 +  LOG("GPU blit {}x{} stride {} -> DMABuf {}", aWidth, aHeight, desc.stride,
 +      surface->GetUID());
 +  RefPtr<layers::Image> result = new layers::DMABUFSurfaceImage(surface);
@@ -909,7 +968,29 @@
    releaseTextures.release();
    return true;
  }
-@@ -1594,6 +1596,24 @@
+@@ -1324,6 +1326,21 @@
+   const auto& egl = gle->mEgl;
+
+   if (mTexture && mGL->MakeCurrent()) {
++    if (mGbmBufferFlags & DMABUF_SYNCHRONIZE_READS) {
++      // Complete submitted texture reads before dropping the global reference
++      // which permits the external producer to overwrite this allocation.
++      EGLSync sync = egl->fCreateSyncKHR(LOCAL_EGL_SYNC_FENCE, nullptr);
++      if (sync) {
++        mGL->fFlush();
++        if (egl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER) !=
++            LOCAL_EGL_CONDITION_SATISFIED) {
++          mGL->fFinish();
++        }
++        egl->fDestroySync(sync);
++      } else {
++        mGL->fFinish();
++      }
++    }
+     mGL->fDeleteTextures(1, &mTexture);
+     mTexture = 0;
+   }
+@@ -1594,6 +1611,25 @@
                           << gfx::hexa(mFOURCCFormat);
        return gfx::SurfaceFormat::UNKNOWN;
    }
@@ -924,6 +1005,7 @@
 +  surface->mFOURCCFormat = GBM_FORMAT_ABGR8888;
 +  surface->mBufferModifier = DRM_FORMAT_MOD_LINEAR;
 +  surface->mBufferPlaneCount = 1;
++  surface->mGbmBufferFlags = DMABUF_SYNCHRONIZE_READS;
 +  surface->mDmabufFds[0] = new gfx::FileHandleWrapper(std::move(aFd));
 +  surface->mSyncFd = new gfx::FileHandleWrapper(std::move(aFence));
 +  surface->mStrides[0] = aStride;
@@ -936,7 +1018,16 @@
  already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateDMABufSurface(
 --- a/widget/gtk/DMABufSurface.h
 +++ b/widget/gtk/DMABufSurface.h
-@@ -356,6 +356,9 @@
+@@ -78,6 +78,8 @@
+   // and complex internal structure (tiling/compression/etc.)
+   // so we can't do direct rendering to it.
+   DMABUF_USE_MODIFIERS = 1 << 3,
++  // External producers reuse storage after all imported references retire.
++  DMABUF_SYNCHRONIZE_READS = 1u << 31,
+ } DMABufSurfaceFlags;
+
+ class DMABufSurfaceRGBA;
+@@ -356,6 +358,9 @@
 
  class DMABufSurfaceRGBA final : public DMABufSurface {
   public:
