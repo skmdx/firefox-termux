@@ -382,7 +382,7 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,307 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -420,9 +420,9 @@
 +  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
 +                                    AHardwareBuffer_Desc*);
 +  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*, int);
-+  int (*fAHardwareBuffer_lockPlanes)(AHardwareBuffer*, uint64_t, int32_t,
-+                                     const ARect*, AHardwareBuffer_Planes*);
-+  int (*fAHardwareBuffer_unlock)(AHardwareBuffer*, int32_t*);
++  media_status_t (*fAImage_getPlaneData)(const AImage*, int, uint8_t**, int*);
++  media_status_t (*fAImage_getPlaneRowStride)(const AImage*, int, int32_t*);
++  media_status_t (*fAImage_getPlanePixelStride)(const AImage*, int, int32_t*);
 +  void (*fANativeWindow_acquire)(ANativeWindow*);
 +  media_status_t (*fAImageReader_newWithUsage)(int32_t, int32_t, int32_t,
 +                                               uint64_t, int32_t,
@@ -464,8 +464,9 @@
 +  }
 +    LOAD(android, AHardwareBuffer_describe)
 +    LOAD(android, AHardwareBuffer_sendHandleToUnixSocket)
-+    LOAD(android, AHardwareBuffer_lockPlanes)
-+    LOAD(android, AHardwareBuffer_unlock)
++    LOAD(media, AImage_getPlaneData)
++    LOAD(media, AImage_getPlaneRowStride)
++    LOAD(media, AImage_getPlanePixelStride)
 +    LOAD(android, ANativeWindow_acquire)
 +    LOAD(media, AImageReader_newWithUsage)
 +    LOAD(media, AImageReader_delete)
@@ -526,7 +527,7 @@
 +  // Map only to discover layout, once per decoder allocation. No pixels are
 +  // read or copied. Match the mapping to the exported dma-buf inode so an
 +  // implementation returning a separate staging allocation is rejected.
-+  Layout* GetLayout(AHardwareBuffer* buffer, int acquireFence) {
++  Layout* GetLayout(AImage* image, AHardwareBuffer* buffer) {
 +    UniqueFileHandle fd(ExportFd(buffer));
 +    struct stat st{};
 +    if (!fd || fstat(fd.get(), &st)) return nullptr;
@@ -534,23 +535,21 @@
 +      if (layout.inode == st.st_ino && layout.device == st.st_dev)
 +        return &layout;
 +    }
-+    AHardwareBuffer_Planes planes{};
-+    if (fAHardwareBuffer_lockPlanes(buffer,
-+                                    AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
-+                                    acquireFence, nullptr, &planes)) {
-+      LOG("Cannot inspect decoder buffer plane layout");
-+      return nullptr;
++    uint8_t* data[3]{};
++    int32_t strides[3]{}, steps[3]{};
++    for (int i = 0; i < 3; ++i) {
++      int length;
++      if (fAImage_getPlaneData(image, i, &data[i], &length) != AMEDIA_OK ||
++          fAImage_getPlaneRowStride(image, i, &strides[i]) != AMEDIA_OK ||
++          fAImage_getPlanePixelStride(image, i, &steps[i]) != AMEDIA_OK) {
++        LOG("Cannot inspect decoder image plane {}", i);
++        return nullptr;
++      }
 +    }
-+    auto unlock =
-+        MakeScopeExit([&] { fAHardwareBuffer_unlock(buffer, nullptr); });
-+    if (planes.planeCount != 3 || planes.planes[0].pixelStride != 1 ||
-+        planes.planes[1].pixelStride != 2 ||
-+        planes.planes[2].pixelStride != 2 ||
-+        static_cast<uint8_t*>(planes.planes[2].data) !=
-+            static_cast<uint8_t*>(planes.planes[1].data) + 1) {
-+      LOG("Unsupported decoder YUV layout: planes {} steps {} {} {}",
-+          planes.planeCount, planes.planes[0].pixelStride,
-+          planes.planes[1].pixelStride, planes.planes[2].pixelStride);
++    if (steps[0] != 1 || steps[1] != 2 || steps[2] != 2 ||
++        data[2] != data[1] + 1) {
++      LOG("Unsupported decoder YUV layout: steps {} {} {}", steps[0], steps[1],
++          steps[2]);
 +      return nullptr;
 +    }
 +    FILE* maps = fopen("/proc/self/maps", "re");
@@ -559,7 +558,7 @@
 +    Layout layout{std::move(fd),
 +                  st.st_ino,
 +                  st.st_dev,
-+                  {planes.planes[0].rowStride, planes.planes[1].rowStride},
++                  {uint32_t(strides[0]), uint32_t(strides[1])},
 +                  {0, 0}};
 +    bool found[2]{};
 +    char line[1024];
@@ -572,7 +571,7 @@
 +          mapMinor != minor(st.st_dev))
 +        continue;
 +      for (int i = 0; i < 2; ++i) {
-+        auto address = reinterpret_cast<uintptr_t>(planes.planes[i].data);
++        auto address = reinterpret_cast<uintptr_t>(data[i]);
 +        if (address >= start && address < end) {
 +          auto planeOffset = offset + address - start;
 +          if (planeOffset > UINT32_MAX) return nullptr;
@@ -667,7 +666,7 @@
 +  if (m->fAImage_getHardwareBuffer(image, &buffer) != AMEDIA_OK ||
 +      m->fAImage_getCropRect(image, &crop) != AMEDIA_OK)
 +    return nullptr;
-+  auto* layout = m->GetLayout(buffer, acquireFd);
++  auto* layout = m->GetLayout(image, buffer);
 +  if (!layout) return nullptr;
 +  if (crop.left % 2 || crop.top % 2 || crop.right - crop.left != aWidth ||
 +      crop.bottom - crop.top != aHeight) {
