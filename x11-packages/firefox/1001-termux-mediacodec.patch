@@ -1,0 +1,271 @@
+--- a/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
++++ b/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
+@@ -58,6 +58,9 @@
+     }
+
+     const AVHWDeviceType kDeviceTypes[] = {
++#  ifdef MOZ_TERMUX_MEDIACODEC
++        AV_HWDEVICE_TYPE_MEDIACODEC,
++#  else
+ #  ifdef XP_WIN
+         AV_HWDEVICE_TYPE_D3D11VA,
+ #  endif
+@@ -72,6 +75,7 @@
+         AV_HWDEVICE_TYPE_MEDIACODEC,
+         AV_HWDEVICE_TYPE_NONE,  // Placeholder for audio.
+ #  endif
++#  endif
+     };
+
+     struct CodecEntry {
+@@ -80,6 +84,9 @@
+     };
+
+     const CodecEntry kCodecIDs[] = {
++#  ifdef MOZ_TERMUX_MEDIACODEC
++        {AV_CODEC_ID_H264, StaticPrefs::media_ffmpeg_mediacodec_enabled()},
++#  else
+     // The following open video codecs can be decoded via hardware by using the
+     // system ffmpeg or ffvpx.
+ #  if LIBAVCODEC_VERSION_MAJOR >= 59
+@@ -107,6 +114,7 @@
+         {AV_CODEC_ID_HEVC, true},
+         {AV_CODEC_ID_H264, true},
+         {AV_CODEC_ID_AAC, true},
++#  endif
+ #  endif
+     };
+
+--- a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
++++ b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
+@@ -104,8 +104,10 @@
+ #  include "ffvpx/hwcontext_d3d11va.h"
+ #endif
+
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
++#  include "ffvpx/hwcontext_mediacodec.h"
++#endif
+ #ifdef MOZ_WIDGET_ANDROID
+-#  include "ffvpx/hwcontext_mediacodec.h"
+ #  include "ffvpx/mediacodec.h"
+ #  include "mozilla/java/CodecProxyWrappers.h"
+ #  include "mozilla/java/GeckoSurfaceWrappers.h"
+@@ -291,7 +293,7 @@
+ #ifdef MOZ_USE_HWDECODE
+ static AVPixelFormat ChooseMediaCodecPixelFormat(
+     AVCodecContext* aCodecContext, const AVPixelFormat* aFormats) {
+-#  ifdef MOZ_WIDGET_ANDROID
++#  if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
+   FFMPEGV_LOG("Choosing FFmpeg pixel format for MediaCodec video decoding {}. ",
+               static_cast<int>(*aFormats));
+   for (; *aFormats > -1; aFormats++) {
+@@ -870,6 +872,12 @@
+ #if defined(MOZ_USE_HWDECODE)
+ bool FFmpegVideoDecoder<LIBAV_VER>::ShouldDisableHWDecoding(
+     bool aDisableHardwareDecoding) const {
++#  ifdef MOZ_TERMUX_MEDIACODEC
++  // Byte-buffer output does not depend on VA-API or hardware WebRender.
++  return aDisableHardwareDecoding || !XRE_IsRDDProcess() ||
++         !StaticPrefs::media_ffmpeg_mediacodec_enabled() ||
++         mCodecID != AV_CODEC_ID_H264;
++#  else
+ #  ifdef MOZ_WIDGET_ANDROID
+ #    ifdef FFVPX_VERSION
+   // We only support decrypt and decode with MediaCodec.
+@@ -939,6 +947,7 @@
+   }
+ #  endif
+   return aDisableHardwareDecoding;
++#  endif
+ }
+ #endif
+
+@@ -1001,6 +1010,11 @@
+     return;
+   }
+
++#  ifdef MOZ_TERMUX_MEDIACODEC
++  Unused << InitMediaCodecDecoder();
++  return;
++#  else
++
+ #  if defined(MOZ_ENABLE_VULKAN_VIDEO) && LIBAVCODEC_VERSION_MAJOR >= 60 && \
+       !defined(FFVPX_VERSION)
+   if (NS_SUCCEEDED(InitVulkanDecoder())) {
+@@ -1040,6 +1054,7 @@
+     return;
+   }
+ #  endif
++#  endif  // MOZ_TERMUX_MEDIACODEC
+ }
+ #endif  // MOZ_USE_HWDECODE
+
+@@ -1654,7 +1669,11 @@
+
+     MediaResult rv;
+ #  ifdef MOZ_USE_HWDECODE
+-    if (IsHardwareAccelerated()) {
++    if (IsHardwareAccelerated()
++#    ifdef MOZ_TERMUX_MEDIACODEC
++        && !mMediaCodecDeviceContext
++#    endif
++    ) {
+ #    ifdef MOZ_WIDGET_GTK
+       mDecodeStats.UpdateDecodeTimes(Duration(mFrame));
+       if (mDecodeStats.IsDecodingSlow() &&
+@@ -1990,6 +2009,19 @@
+   b.mPlanes[0].mSkip = 0;
+   b.mPlanes[1].mSkip = 0;
+   b.mPlanes[2].mSkip = 0;
++
++#ifdef MOZ_TERMUX_MEDIACODEC
++  if (mMediaCodecDeviceContext) {
++    if (mFrame->format == AV_PIX_FMT_NV12) {
++      b.mPlanes[2].mData = mFrame->data[1] + 1;
++      b.mPlanes[2].mStride = mFrame->linesize[1];
++      b.mPlanes[1].mSkip = b.mPlanes[2].mSkip = 1;
++    } else if (mFrame->format != AV_PIX_FMT_YUV420P) {
++      return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
++                         RESULT_DETAIL("Unsupported MediaCodec buffer format"));
++    }
++  }
++#endif
+
+   b.mPlanes[0].mWidth = mFrame->width;
+   b.mPlanes[0].mHeight = mFrame->height;
+@@ -2543,6 +2575,8 @@
+ #ifdef MOZ_WIDGET_ANDROID
+   mShouldResumeDrain = false;
+   ReleaseFramesMediaCodec();
++#endif
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
+   if (mMediaCodecDeviceContext) {
+     mLib->av_buffer_unref(&mMediaCodecDeviceContext);
+   }
+@@ -2587,7 +2621,9 @@
+
+ bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
+     nsACString& aFailureReason) const {
+-#if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
++#ifdef MOZ_TERMUX_MEDIACODEC
++  return !!mMediaCodecDeviceContext;
++#elif defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
+   return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
+ #elif defined(MOZ_ENABLE_D3D11VA)
+   return !!mD3D11VADeviceContext;
+@@ -3047,15 +3083,20 @@
+ }
+ #  endif
+
++#endif  // MOZ_WIDGET_ANDROID
++
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
+ MediaResult FFmpegVideoDecoder<LIBAV_VER>::InitMediaCodecDecoder() {
+   FFMPEG_LOG("Initialising MediaCodec FFmpeg decoder");
+   StaticMutexAutoLock mon(sMutex);
+
++#  ifdef MOZ_WIDGET_ANDROID
+   if (StaticPrefs::media_ffvpx_hw_minimal() && mCodecID != AV_CODEC_ID_H264 &&
+       mCodecID != AV_CODEC_ID_HEVC) {
+     return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+                        RESULT_DETAIL("codec not allowed when minimal"));
+   }
++#  endif
+
+   if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
+     return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+@@ -3102,6 +3143,12 @@
+   AVMediaCodecDeviceContext* mediacodecctx =
+       (AVMediaCodecDeviceContext*)hwctx->hwctx;
+
++#  ifdef MOZ_TERMUX_MEDIACODEC
++  // FFmpeg maps output buffers to YUV420P/NV12 when there is no Surface.
++  mediacodecctx->surface = nullptr;
++  mediacodecctx->native_window = nullptr;
++  mediacodecctx->create_window = 0;
++#  else
+   if (XRE_IsGPUProcess() &&
+       gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
+     MOZ_ASSERT(!mAndroidImageReader);
+@@ -3156,6 +3203,7 @@
+     mediacodecctx->create_window = 0;  // default -- useful when encoding?
+   }
+
++#  endif
+   if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
+     FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
+     return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+@@ -3188,7 +3236,9 @@
+   releaseResources.release();
+   return NS_OK;
+ }
+-
++#endif
++
++#ifdef MOZ_WIDGET_ANDROID
+ MediaResult FFmpegVideoDecoder<LIBAV_VER>::CreateImageMediaCodec(
+     int64_t aOffset, int64_t aPts, int64_t aTimecode, int64_t aDuration,
+     MediaDataDecoder::DecodedData& aResults) {
+--- a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.h
++++ b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.h
+@@ -226,20 +226,22 @@
+   std::atomic<uint8_t> mNumOfHWTexturesInUse{0};
+ #endif
+
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
++  MediaResult InitMediaCodecDecoder();
++  AVBufferRef* mMediaCodecDeviceContext = nullptr;
++#endif
+ #ifdef MOZ_WIDGET_ANDROID
+ #  ifdef USING_MOZFFVPX
+   MediaResult AllocateExtraData();
+   MediaResult AllocateH264ExtraData();
+   MediaResult AllocateHEVCExtraData();
+ #  endif
+-  MediaResult InitMediaCodecDecoder();
+   MediaResult CreateImageMediaCodec(int64_t aOffset, int64_t aPts,
+                                     int64_t aTimecode, int64_t aDuration,
+                                     MediaDataDecoder::DecodedData& aResults);
+   bool ReleaseFrameMediaCodec(void* aKey, bool aRender);
+   void ReleaseFramesMediaCodec();
+   int32_t mTextureAlignment;
+-  AVBufferRef* mMediaCodecDeviceContext = nullptr;
+   // Only used for the SurfaceTexture case
+   java::GeckoSurface::GlobalRef mSurfaceTextureSurface;
+   // Only used for the ImageReader case
+--- a/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
++++ b/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
+@@ -53,3 +53,7 @@
+ ]
+
+ FINAL_LIBRARY = "xul"
++
++# This downstream recipe targets Android's NDK with the GTK widget backend.
++DEFINES["MOZ_TERMUX_MEDIACODEC"] = 1
++DEFINES["MOZ_USE_HWDECODE"] = 1
+--- a/media/ffvpx/libavutil/moz.build
++++ b/media/ffvpx/libavutil/moz.build
+@@ -94,7 +94,7 @@
+         "hwcontext_d3d11va.h"
+     ]
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
+     EXPORTS.ffvpx += [
+         "hwcontext_mediacodec.h"
+     ]
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -12770,6 +12770,12 @@
+     mirror: always
+ #endif
+
++# Use the NDK MediaCodec decoder in the Termux GTK build.
++- name: media.ffmpeg.mediacodec.enabled
++  type: RelaxedAtomicBool
++  value: true
++  mirror: always
++
+ # Disable falling back to software decoders in case of frame drop
+ - name: media.ffmpeg.disable-software-fallback
+   type: RelaxedAtomicBool
