@@ -211,7 +211,17 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
-@@ -2543,6 +2590,8 @@
+@@ -2449,6 +2496,9 @@
+ FFmpegVideoDecoder<LIBAV_VER>::ProcessFlush() {
+   FFMPEG_LOG("ProcessFlush()");
+   MOZ_ASSERT(mTaskQueue->IsOnCurrentThread());
++#ifdef MOZ_TERMUX_MEDIACODEC
++  if (mTermuxSurface) mTermuxSurface->Flush();
++#endif
+ #if LIBAVCODEC_VERSION_MAJOR >= 58
+   mHasSentDrainPacket = false;
+ #endif
+@@ -2543,6 +2593,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
    ReleaseFramesMediaCodec();
@@ -220,7 +230,7 @@
    if (mMediaCodecDeviceContext) {
      mLib->av_buffer_unref(&mMediaCodecDeviceContext);
    }
-@@ -2561,6 +2610,9 @@
+@@ -2561,6 +2613,9 @@
    // 3. av_buffer_unref(&mVulkanDeviceContext) — may be the last ref and call
    //    vkDestroyDevice, so it must come after Cleanup().
    FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
@@ -230,7 +240,7 @@
  #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
    if (IsHardwareAccelerated()) {
  #  if LIBAVCODEC_VERSION_MAJOR >= 60 && !defined(FFVPX_VERSION)
-@@ -2587,7 +2639,9 @@
+@@ -2587,7 +2642,9 @@
 
  bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
      nsACString& aFailureReason) const {
@@ -241,7 +251,7 @@
    return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
  #elif defined(MOZ_ENABLE_D3D11VA)
    return !!mD3D11VADeviceContext;
-@@ -3047,15 +3101,20 @@
+@@ -3047,15 +3104,20 @@
  }
  #  endif
 
@@ -262,7 +272,7 @@
 
    if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3087,6 +3146,9 @@
+@@ -3087,6 +3149,9 @@
      if (mMediaCodecDeviceContext) {
        mLib->av_buffer_unref(&mMediaCodecDeviceContext);
      }
@@ -272,7 +282,7 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3164,33 @@
+@@ -3102,6 +3167,33 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
@@ -306,7 +316,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3245,7 @@
+@@ -3156,6 +3248,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -314,7 +324,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3178,6 +3268,14 @@
+@@ -3178,6 +3271,14 @@
    }
  #  endif
 
@@ -329,7 +339,7 @@
    if (mLib->avcodec_open2(mCodecContext, codec, nullptr) < 0) {
      FFMPEG_LOG("  avcodec_open2 failed for MediaCodec decoder");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3286,30 @@
+@@ -3188,7 +3289,30 @@
    releaseResources.release();
    return NS_OK;
  }
@@ -404,7 +414,7 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,311 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -439,8 +449,6 @@
 +  std::mutex mutex;
 +  std::condition_variable available;
 +  // Resolve newer NDK entry points dynamically; the package targets API 24.
-+  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
-+                                    AHardwareBuffer_Desc*);
 +  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*, int);
 +  media_status_t (*fAImage_getPlaneData)(const AImage*, int, uint8_t**, int*);
 +  media_status_t (*fAImage_getPlaneRowStride)(const AImage*, int, int32_t*);
@@ -484,7 +492,6 @@
 +    LOG("Missing Android entry point: {}", #name);                  \
 +    return false;                                                   \
 +  }
-+    LOAD(android, AHardwareBuffer_describe)
 +    LOAD(android, AHardwareBuffer_sendHandleToUnixSocket)
 +    LOAD(media, AImage_getPlaneData)
 +    LOAD(media, AImage_getPlaneRowStride)
@@ -659,6 +666,13 @@
 +  return m->window;
 +}
 +void TermuxMediaCodecSurface::ReleaseUnusedImages() { m->ReleaseUnused(); }
++void TermuxMediaCodecSurface::Flush() {
++  // Codec flush may replace the producer's allocations. Displayed surfaces
++  // retain their own fds; layout caching must not retain retired allocations.
++  LOG("Discarding {} cached decoder layouts", m->layouts.size());
++  m->layouts.clear();
++  m->ReleaseUnused();
++}
 +already_AddRefed<layers::Image> TermuxMediaCodecSurface::AcquireImage(
 +    int aWidth, int aHeight, gfx::YUVColorSpace aColorSpace,
 +    gfx::ColorRange aColorRange) {
@@ -714,7 +728,7 @@
 +}  // namespace mozilla
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -739,6 +753,7 @@
 +  MediaResult Init(int aWidth, int aHeight);
 +  void* AcquireWindow();
 +  void ReleaseUnusedImages();
++  void Flush();
 +  already_AddRefed<layers::Image> AcquireImage(int aWidth, int aHeight,
 +                                               gfx::YUVColorSpace aColorSpace,
 +                                               gfx::ColorRange aColorRange);
@@ -811,21 +826,15 @@
    releaseTextures.release();
    return true;
  }
-@@ -1596,12 +1598,50 @@
+@@ -1594,6 +1596,33 @@
+                          << gfx::hexa(mFOURCCFormat);
+       return gfx::SurfaceFormat::UNKNOWN;
    }
- }
-
--already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateDMABufSurface(
--    mozilla::gl::GLContext* aGLContext, int aWidth, int aHeight,
--    int aDMABufSurfaceFlags, RefPtr<mozilla::widget::DRMFormat> aFormat) {
-+already_AddRefed<DMABufSurfaceYUV>
-+DMABufSurfaceYUV::CreateFromNV12(UniqueFileHandle aFd,
-+                                 UniqueFileHandle aFence,
-+                                 int aWidth,
-+                                 int aHeight,
-+                                 const uint32_t* aStrides,
-+                                 const uint32_t* aOffsets)
-+{
++}
++
++already_AddRefed<DMABufSurfaceYUV> DMABufSurfaceYUV::CreateFromNV12(
++    UniqueFileHandle aFd, UniqueFileHandle aFence, int aWidth, int aHeight,
++    const uint32_t* aStrides, const uint32_t* aOffsets) {
 +  auto surface = MakeRefPtr<DMABufSurfaceYUV>();
 +  surface->mFOURCCFormat = VA_FOURCC_NV12;
 +  surface->mBufferPlaneCount = 2;
@@ -843,31 +852,15 @@
 +    surface->mOffsets[i] = aOffsets[i];
 +    surface->mBufferModifiers[i] = DRM_FORMAT_MOD_LINEAR;
 +  }
-+  if (aFence)
-+    surface->mSyncFd = new gfx::FileHandleWrapper(std::move(aFence));
++  if (aFence) surface->mSyncFd = new gfx::FileHandleWrapper(std::move(aFence));
 +  surface->GlobalRefCountCreate();
 +  LogMemoryAddYUV(surface->GetUID(),
 +                  GetUsedMemoryYUV(VA_FOURCC_NV12, aWidth, aHeight));
 +  return surface.forget();
-+}
-+
-+already_AddRefed<DMABufSurfaceRGBA>
-+DMABufSurfaceRGBA::CreateDMABufSurface(
-+  mozilla::gl::GLContext* aGLContext,
-+  int aWidth,
-+  int aHeight,
-+  int aDMABufSurfaceFlags,
-+  RefPtr<mozilla::widget::DRMFormat> aFormat)
-+{
-   auto surf = MakeRefPtr<DMABufSurfaceRGBA>();
--  if (!surf->Create(aGLContext, aWidth, aHeight, aDMABufSurfaceFlags,
--                    aFormat)) {
-+  if (!surf->Create(
-+        aGLContext, aWidth, aHeight, aDMABufSurfaceFlags, aFormat)) {
-     return nullptr;
-   }
-   return surf.forget();
-@@ -2149,7 +2189,7 @@
+ }
+
+ already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateDMABufSurface(
+@@ -2149,7 +2178,7 @@
      modifiers.AppendElement(mBufferModifiers[i]);
    }
 
@@ -876,7 +869,7 @@
      fenceFDs.AppendElement(WrapNotNull(mSyncFd));
    }
 
-@@ -2283,6 +2323,7 @@
+@@ -2283,6 +2312,7 @@
    aGLContext->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MIN_FILTER,
                               LOCAL_GL_LINEAR);
    aGLContext->fEGLImageTargetTexture2D(LOCAL_GL_TEXTURE_2D, mEGLImage[aPlane]);
@@ -884,7 +877,7 @@
 
    GLenum glErr = aGLContext->fGetError();
 
-@@ -2293,7 +2334,8 @@
+@@ -2293,7 +2323,8 @@
      return true;
    }
 
@@ -894,7 +887,7 @@
        GetFOURCCFormat() == VA_FOURCC_NV12 &&
        CreateTextureViaCopyYUV(aGLContext, aPlane)) {
      LOGDMABUF("  Plane %d: successfully created texture via copy", aPlane);
-@@ -2413,6 +2455,22 @@
+@@ -2413,6 +2444,22 @@
      return;
    }
 

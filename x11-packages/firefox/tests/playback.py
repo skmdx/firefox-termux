@@ -34,6 +34,11 @@ async function run() {
   events.push({stage:'seeked',...snapshot()}); await v.play();
   await new Promise(r=>setTimeout(r,2000)); v.pause();
   events.push({stage:'replayed',...snapshot()});
+  for(let i=0;i<SEEK_COUNT;i++) {
+    const sought=event('seeked'); v.currentTime=i%2 ? 2 : 8; await sought;
+    await v.play(); await new Promise(r=>setTimeout(r,250)); v.pause();
+    events.push({stage:'repeated-seek',...snapshot()});
+  }
   const capture=event('seeked');
   const frameShown=new Promise(resolve=>v.requestVideoFrameCallback((now,metadata)=>resolve(metadata.mediaTime)));
   v.currentTime=CAPTURE_TIME; await capture; const mediaTime=await frameShown;
@@ -81,8 +86,10 @@ def main():
     parser.add_argument('--expect-cpu', action='store_true', help='Expect automatic CPU output without changing the surface preference')
     parser.add_argument('--display', default=':5')
     parser.add_argument('--capture-time', type=float, default=4)
+    parser.add_argument('--seek-count', type=int, default=0)
     args = parser.parse_args()
     page = PAGE.replace(b'CAPTURE_TIME', str(args.capture_time).encode())
+    page = page.replace(b'SEEK_COUNT', str(args.seek_count).encode())
     args.out.mkdir(parents=True, exist_ok=False)
     metadata = json.loads(subprocess.check_output([
         'ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -198,6 +205,9 @@ def main():
         result['software_init'] = 'init, IsHardwareAccelerated=false' in logs
         result['gpu_frames'] = logs.count('GPU blit ')
         result['zero_copy_frames'] = logs.count('Zero-copy NV12 ')
+        result['zero_copy_plane_imports'] = logs.count('zero-copy EGLImageTargetTexture2D succeeded')
+        result['texture_copies'] = logs.count('successfully created texture via copy')
+        result['max_outstanding_images'] = max(map(int, re.findall(r'outstanding (\d+)', logs)), default=0)
         slots = re.findall(r'Allocated RGBA pool slot (\d+)', logs)
         result['pool_slots'] = max(map(int, slots), default=-1) + 1
         result['pool_allocations'] = len(slots)
@@ -211,8 +221,11 @@ def main():
             and (result['software_init'] if args.software else not result['software_init']))
         result['passed'] = bool(result['passed']
             and result['gpu_frames'] == 0
+            and result['texture_copies'] == 0
             and (args.software or ((args.cpu_buffer or args.expect_cpu) and result['zero_copy_frames'] == 0)
-                 or (not args.cpu_buffer and not args.expect_cpu and result['zero_copy_frames'] >= expected_frames))
+                 or (not args.cpu_buffer and not args.expect_cpu
+                     and result['zero_copy_frames'] >= expected_frames
+                     and result['zero_copy_plane_imports'] > 0))
             and all(e['width'] == metadata['width'] and e['height'] == metadata['height'] and not e['error']
                     for e in result.get('events', []))
             and result.get('events', [{}])[0].get('decoded', 0) >= expected_frames
