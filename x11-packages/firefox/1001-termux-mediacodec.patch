@@ -169,7 +169,21 @@
  #    ifdef MOZ_WIDGET_GTK
        mDecodeStats.UpdateDecodeTimes(Duration(mFrame));
        if (mDecodeStats.IsDecodingSlow() &&
-@@ -1990,6 +2020,19 @@
+@@ -1719,6 +1749,13 @@
+     if (aGotFrame) {
+       *aGotFrame = true;
+     }
++#  ifdef MOZ_TERMUX_MEDIACODEC
++    if (mTermuxSurface) {
++      // Publish each image before decoding another: a batch can exhaust the
++      // bounded output pool while its images are still held in aResults.
++      return aData ? NS_OK : NS_ERROR_NOT_AVAILABLE;
++    }
++#  endif
+   } while (true);
+ #else
+   if (!PrepareFrame()) {
+@@ -1990,6 +2027,19 @@
    b.mPlanes[0].mSkip = 0;
    b.mPlanes[1].mSkip = 0;
    b.mPlanes[2].mSkip = 0;
@@ -189,7 +203,7 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
-@@ -2470,7 +2513,7 @@
+@@ -2470,7 +2520,7 @@
    return FFmpegDataDecoder::ProcessFlush();
  }
 
@@ -198,7 +212,7 @@
  Maybe<MediaDataDecoder::PropertyValue> FFmpegVideoDecoder<
      LIBAV_VER>::GetDecodeProperty(MediaDataDecoder::PropertyName aName) const {
    // If we are using a software decoder, then we aren't subject to platform
-@@ -2484,7 +2527,12 @@
+@@ -2484,7 +2534,12 @@
    }
 
    // Android has limited amount of output buffers. See Bug 794747.
@@ -211,7 +225,7 @@
    // SurfaceTexture can have only one current/renderable image at a time.
    // See Bug 1299068
    static constexpr uint32_t kNumCurrentImages = 1;
-@@ -2543,6 +2591,8 @@
+@@ -2543,6 +2598,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
    ReleaseFramesMediaCodec();
@@ -220,7 +234,7 @@
    if (mMediaCodecDeviceContext) {
      mLib->av_buffer_unref(&mMediaCodecDeviceContext);
    }
-@@ -2561,6 +2611,9 @@
+@@ -2561,6 +2618,9 @@
    // 3. av_buffer_unref(&mVulkanDeviceContext) — may be the last ref and call
    //    vkDestroyDevice, so it must come after Cleanup().
    FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
@@ -230,7 +244,7 @@
  #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
    if (IsHardwareAccelerated()) {
  #  if LIBAVCODEC_VERSION_MAJOR >= 60 && !defined(FFVPX_VERSION)
-@@ -2587,7 +2640,9 @@
+@@ -2587,7 +2647,9 @@
 
  bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
      nsACString& aFailureReason) const {
@@ -241,7 +255,7 @@
    return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
  #elif defined(MOZ_ENABLE_D3D11VA)
    return !!mD3D11VADeviceContext;
-@@ -3047,15 +3102,20 @@
+@@ -3047,15 +3109,20 @@
  }
  #  endif
 
@@ -262,7 +276,7 @@
 
    if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3087,6 +3147,9 @@
+@@ -3087,6 +3154,9 @@
      if (mMediaCodecDeviceContext) {
        mLib->av_buffer_unref(&mMediaCodecDeviceContext);
      }
@@ -272,7 +286,7 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3165,33 @@
+@@ -3102,6 +3172,33 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
@@ -306,7 +320,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3246,7 @@
+@@ -3156,6 +3253,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -314,7 +328,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3279,30 @@
+@@ -3188,7 +3286,30 @@
    releaseResources.release();
    return NS_OK;
  }
