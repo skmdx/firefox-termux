@@ -1,3 +1,30 @@
+--- a/dom/media/MediaData.cpp
++++ b/dom/media/MediaData.cpp
+@@ -351,13 +351,19 @@
+   PlanarYCbCrData data = ConstructPlanarYCbCrData(aInfo, aBuffer, aPicture);
+
+   if (aCopyData) {
+-    return MediaResult::Logged(aVideoImage->CopyData(data),
+-                               RESULT_DETAIL("Failed to copy image data"),
++    nsresult rv = aVideoImage->CopyData(data);
++    if (NS_FAILED(rv)) {
++      return MediaResult::Logged(rv, RESULT_DETAIL("Failed to copy image data"),
++                                 sPDMLog);
++    }
++    return NS_OK;
++  }
++  nsresult rv = aVideoImage->AdoptData(data);
++  if (NS_FAILED(rv)) {
++    return MediaResult::Logged(rv, RESULT_DETAIL("Failed to adopt image data"),
+                                sPDMLog);
+   }
+-  return MediaResult::Logged(aVideoImage->AdoptData(data),
+-                             RESULT_DETAIL("Failed to adopt image data"),
+-                             sPDMLog);
++  return NS_OK;
+ }
+
+ /* static */
 --- a/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 +++ b/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 @@ -58,6 +58,9 @@
