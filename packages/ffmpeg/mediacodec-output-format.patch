@@ -1,0 +1,29 @@
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -59,6 +59,7 @@
+     int use_ndk_codec;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
++    int output_color_format;
+ } MediaCodecH264DecContext;
+ 
+ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -440,6 +441,9 @@
+     }
+     if (s->operating_rate > 0)
+         ff_AMediaFormat_setInt32(format, "operating-rate", s->operating_rate);
++
++    if (s->output_color_format)
++        ff_AMediaFormat_setInt32(format, "color-format", s->output_color_format);
+ 
+     s->ctx = av_mallocz(sizeof(*s->ctx));
+     if (!s->ctx) {
+@@ -600,6 +604,8 @@
+                    OFFSET(use_ndk_codec), AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, VD },
+     { "operating_rate", "The desired operating rate that the codec will need to operate at, zero for unspecified",
+             OFFSET(operating_rate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, VD },
++    { "output_color_format", "Android MediaCodec output color format, zero for default",
++            OFFSET(output_color_format), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, VD },
+     { NULL }
+ };
+ 

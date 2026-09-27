@@ -307,7 +307,22 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3271,30 @@
+@@ -3178,6 +3261,14 @@
+   }
+ #  endif
+
++#  ifdef MOZ_TERMUX_MEDIACODEC
++  // COLOR_FormatYUV420SemiPlanar: request linear NV12 rather than vendor UBWC.
++  if (mTermuxSurface && mLib->av_opt_set_int(mCodecContext->priv_data,
++                                           "output_color_format", 21, 0) < 0) {
++    return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
++                       RESULT_DETAIL("FFmpeg lacks MediaCodec output format selection"));
++  }
++#  endif
+   if (mLib->avcodec_open2(mCodecContext, codec, nullptr) < 0) {
+     FFMPEG_LOG("  avcodec_open2 failed for MediaCodec decoder");
+     return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+@@ -3188,7 +3279,30 @@
    releaseResources.release();
    return NS_OK;
  }
