@@ -369,7 +369,7 @@
 +#include <condition_variable>
 +#include <mutex>
 +
-+#include "DMABufSurface.h"
++#include "mozilla/widget/DMABufSurface.h"
 +#include "mozilla/Logging.h"
 +#include "mozilla/ScopeExit.h"
 +#include "mozilla/UniquePtrExtensions.h"
