@@ -201,6 +201,14 @@ def main():
         server.shutdown()
         result['cgroup'] = 'unavailable: Android does not delegate cgroups to Termux'
         logs = ''.join(p.read_text() for p in args.out.glob('decode.log*'))
+        rdd_pids = set(re.findall(r'\[RDD (\d+):', logs))
+        codec_logs = subprocess.check_output(['logcat', '-d', '-s', 'CCodec:I'], text=True)
+        component_lines = [line for line in codec_logs.splitlines()
+                           if len(line.split()) > 3 and line.split()[2] in rdd_pids
+                           and 'Created component [' in line]
+        (args.out/'codec-components.log').write_text('\n'.join(component_lines)+'\n')
+        result['codec_components'] = sorted(set(re.findall(
+            r'Created component \[([^]]+)\]', '\n'.join(component_lines))))
         result['mediacodec'] = 'MediaCodec FFmpeg init successful' in logs
         result['software_init'] = 'init, IsHardwareAccelerated=false' in logs
         result['gpu_frames'] = logs.count('GPU blit ')
