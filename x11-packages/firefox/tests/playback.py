@@ -5,6 +5,7 @@ import functools
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -150,7 +151,7 @@ def main():
                       'layers.acceleration.force-enabled': True, 'gfx.x11-egl.force-enabled': True})
     (profile/'user.js').write_text(''.join(f'user_pref({json.dumps(k)}, {json.dumps(v)});\n'
                                           for k,v in prefs.items()))
-    env = dict(os.environ, DISPLAY=args.display, MOZ_LOG='FFmpegVideo:5,PlatformDecoderModule:4,TermuxMediaCodec:5,DMABuf:4',
+    env = dict(os.environ, DISPLAY=args.display, MOZ_LOG='FFmpegVideo:5,PlatformDecoderModule:4,TermuxMediaCodec:5,Dmabuf:4',
                MOZ_LOG_FILE=str(args.out/'decode.log'))
     x11 = None
     try:
@@ -184,6 +185,10 @@ def main():
         result['mediacodec'] = 'MediaCodec FFmpeg init successful' in logs
         result['software_init'] = 'init, IsHardwareAccelerated=false' in logs
         result['gpu_frames'] = logs.count('GPU blit ')
+        slots = re.findall(r'Allocated RGBA pool slot (\d+)', logs)
+        result['pool_slots'] = max(map(int, slots), default=-1) + 1
+        result['pool_allocations'] = len(slots)
+        result['codecs'] = sorted(set(re.findall(r'codec (\w+_mediacodec) :', logs)))
         result['copy_log_messages'] = logs.count('Failed to copy image data')
         if 'start' in result and 'end' in result:
             result['playback_cpu_seconds'] = result['end']['cpu_seconds'] - result['start']['cpu_seconds']

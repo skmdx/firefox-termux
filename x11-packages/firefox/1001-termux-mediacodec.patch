@@ -25,6 +25,25 @@
  }
 
  /* static */
+--- a/dom/media/platforms/PDMFactory.cpp
++++ b/dom/media/platforms/PDMFactory.cpp
+@@ -575,13 +575,14 @@
+       StaticPrefs::media_rdd_ffmpeg_enabled() &&
+       !StartupPDM(
+           FFmpegRuntimeLinker::CreateDecoder(),
+-  // When Vulkan video decoding is enabled, insert the full FFmpeg
++  // When Vulkan or Termux MediaCodec decoding is enabled, insert the full FFmpeg
+   // decoder before ffvpx so that Vulkan hardware decoding is
+   // preferred. ffvpx does not support Vulkan decode and would
+   // otherwise be selected first and fall back to software.
+   // TODO (bug 2034236): remove once ffvpx gains Vulkan decode support.
+ #  ifdef MOZ_WIDGET_GTK
+-          StaticPrefs::media_hardware_video_decoding_vulkan_enabled_AtStartup()
++          StaticPrefs::media_hardware_video_decoding_vulkan_enabled_AtStartup() ||
++              StaticPrefs::media_ffmpeg_mediacodec_enabled()
+ #  else
+           false
+ #  endif
 --- a/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 +++ b/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 @@ -58,6 +58,9 @@
@@ -45,17 +64,20 @@
      };
 
      struct CodecEntry {
-@@ -80,6 +84,9 @@
+@@ -80,6 +84,12 @@
      };
 
      const CodecEntry kCodecIDs[] = {
 +#  ifdef MOZ_TERMUX_MEDIACODEC
 +        {AV_CODEC_ID_H264, StaticPrefs::media_ffmpeg_mediacodec_enabled()},
++        {AV_CODEC_ID_HEVC, StaticPrefs::media_ffmpeg_mediacodec_enabled()},
++        {AV_CODEC_ID_VP9, StaticPrefs::media_ffmpeg_mediacodec_enabled()},
++        {AV_CODEC_ID_AV1, StaticPrefs::media_ffmpeg_mediacodec_enabled()},
 +#  else
      // The following open video codecs can be decoded via hardware by using the
      // system ffmpeg or ffvpx.
  #  if LIBAVCODEC_VERSION_MAJOR >= 59
-@@ -107,6 +114,7 @@
+@@ -107,6 +117,7 @@
          {AV_CODEC_ID_HEVC, true},
          {AV_CODEC_ID_H264, true},
          {AV_CODEC_ID_AAC, true},
@@ -98,7 +120,7 @@
    FFMPEGV_LOG("Choosing FFmpeg pixel format for MediaCodec video decoding {}. ",
                static_cast<int>(*aFormats));
    for (; *aFormats > -1; aFormats++) {
-@@ -870,6 +877,12 @@
+@@ -870,6 +877,13 @@
  #if defined(MOZ_USE_HWDECODE)
  bool FFmpegVideoDecoder<LIBAV_VER>::ShouldDisableHWDecoding(
      bool aDisableHardwareDecoding) const {
@@ -106,12 +128,13 @@
 +  // Byte-buffer output does not depend on VA-API or hardware WebRender.
 +  return aDisableHardwareDecoding || !XRE_IsRDDProcess() ||
 +         !StaticPrefs::media_ffmpeg_mediacodec_enabled() ||
-+         mCodecID != AV_CODEC_ID_H264;
++         (mCodecID != AV_CODEC_ID_H264 && mCodecID != AV_CODEC_ID_HEVC &&
++          mCodecID != AV_CODEC_ID_VP9 && mCodecID != AV_CODEC_ID_AV1);
 +#  else
  #  ifdef MOZ_WIDGET_ANDROID
  #    ifdef FFVPX_VERSION
    // We only support decrypt and decode with MediaCodec.
-@@ -939,6 +952,7 @@
+@@ -939,6 +953,7 @@
    }
  #  endif
    return aDisableHardwareDecoding;
@@ -119,7 +142,7 @@
  }
  #endif
 
-@@ -1001,6 +1015,11 @@
+@@ -1001,6 +1016,11 @@
      return;
    }
 
@@ -131,7 +154,7 @@
  #  if defined(MOZ_ENABLE_VULKAN_VIDEO) && LIBAVCODEC_VERSION_MAJOR >= 60 && \
        !defined(FFVPX_VERSION)
    if (NS_SUCCEEDED(InitVulkanDecoder())) {
-@@ -1040,6 +1059,7 @@
+@@ -1040,6 +1060,7 @@
      return;
    }
  #  endif
@@ -139,7 +162,7 @@
  }
  #endif  // MOZ_USE_HWDECODE
 
-@@ -1654,7 +1674,17 @@
+@@ -1654,7 +1675,17 @@
 
      MediaResult rv;
  #  ifdef MOZ_USE_HWDECODE
@@ -158,7 +181,7 @@
  #    ifdef MOZ_WIDGET_GTK
        mDecodeStats.UpdateDecodeTimes(Duration(mFrame));
        if (mDecodeStats.IsDecodingSlow() &&
-@@ -1990,6 +2020,19 @@
+@@ -1990,6 +2021,19 @@
    b.mPlanes[0].mSkip = 0;
    b.mPlanes[1].mSkip = 0;
    b.mPlanes[2].mSkip = 0;
@@ -178,7 +201,7 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
-@@ -2543,6 +2586,8 @@
+@@ -2543,6 +2587,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
    ReleaseFramesMediaCodec();
@@ -187,7 +210,7 @@
    if (mMediaCodecDeviceContext) {
      mLib->av_buffer_unref(&mMediaCodecDeviceContext);
    }
-@@ -2561,6 +2606,9 @@
+@@ -2561,6 +2607,9 @@
    // 3. av_buffer_unref(&mVulkanDeviceContext) — may be the last ref and call
    //    vkDestroyDevice, so it must come after Cleanup().
    FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
@@ -197,7 +220,7 @@
  #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
    if (IsHardwareAccelerated()) {
  #  if LIBAVCODEC_VERSION_MAJOR >= 60 && !defined(FFVPX_VERSION)
-@@ -2587,7 +2635,9 @@
+@@ -2587,7 +2636,9 @@
 
  bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
      nsACString& aFailureReason) const {
@@ -208,7 +231,7 @@
    return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
  #elif defined(MOZ_ENABLE_D3D11VA)
    return !!mD3D11VADeviceContext;
-@@ -3047,15 +3097,20 @@
+@@ -3047,15 +3098,20 @@
  }
  #  endif
 
@@ -229,7 +252,7 @@
 
    if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3087,6 +3142,9 @@
+@@ -3087,6 +3143,9 @@
      if (mMediaCodecDeviceContext) {
        mLib->av_buffer_unref(&mMediaCodecDeviceContext);
      }
@@ -239,7 +262,7 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3160,33 @@
+@@ -3102,6 +3161,33 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
@@ -273,7 +296,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3241,7 @@
+@@ -3156,6 +3242,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -281,7 +304,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3274,30 @@
+@@ -3188,7 +3275,30 @@
    releaseResources.release();
    return NS_OK;
  }
