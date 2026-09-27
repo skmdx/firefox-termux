@@ -272,13 +272,19 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3164,20 @@
+@@ -3102,6 +3164,26 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
 +#  ifdef MOZ_TERMUX_MEDIACODEC
 +  if (StaticPrefs::media_ffmpeg_mediacodec_surface_enabled() && mImageAllocator &&
 +      mImageAllocator->UsingHardwareWebRender()) {
++    mReleaseMediaCodecBuffer = reinterpret_cast<decltype(mReleaseMediaCodecBuffer)>(
++        PR_FindSymbol(mLib->mAVCodecLib, "av_mediacodec_release_buffer"));
++    if (!mReleaseMediaCodecBuffer) {
++      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
++                         RESULT_DETAIL("MediaCodec release symbol is unavailable"));
++    }
 +    mTermuxSurface = MakeUnique<TermuxMediaCodecSurface>();
 +    MediaResult rv = mTermuxSurface->Init(mInfo.mImage.width, mInfo.mImage.height);
 +    if (NS_FAILED(rv)) {
@@ -293,7 +299,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3232,7 @@
+@@ -3156,6 +3238,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -301,7 +307,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3265,30 @@
+@@ -3188,7 +3271,30 @@
    releaseResources.release();
    return NS_OK;
  }
