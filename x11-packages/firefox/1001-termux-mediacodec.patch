@@ -347,13 +347,14 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,435 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "TermuxMediaCodecSurface.h"
 +
++#define EGL_NO_PLATFORM_SPECIFIC_TYPES
 +#include <EGL/egl.h>
 +#include <EGL/eglext.h>
 +#include <GLES2/gl2.h>
@@ -369,51 +370,75 @@
 +#include <condition_variable>
 +#include <mutex>
 +
-+#include "mozilla/widget/DMABufSurface.h"
 +#include "mozilla/Logging.h"
 +#include "mozilla/ScopeExit.h"
 +#include "mozilla/UniquePtrExtensions.h"
 +#include "mozilla/gfx/FileHandleWrapper.h"
 +#include "mozilla/layers/DMABUFSurfaceImage.h"
++#include "mozilla/widget/DMABufSurface.h"
 +
 +namespace mozilla {
 +static LazyLogModule sTermuxSurfaceLog("TermuxMediaCodec");
 +#define LOG(...) MOZ_LOG_FMT(sTermuxSurfaceLog, LogLevel::Debug, __VA_ARGS__)
 +
-+#define ANDROID_FUNCTIONS(X)                             \
-+  X(AHardwareBuffer_allocate)                            \
-+  X(AHardwareBuffer_release) X(AHardwareBuffer_describe) \
-+      X(AHardwareBuffer_sendHandleToUnixSocket) X(ANativeWindow_acquire)
-+#define MEDIA_FUNCTIONS(X)                                                   \
-+  X(AImageReader_newWithUsage)                                               \
-+  X(AImageReader_delete) X(AImageReader_getWindow)                           \
-+      X(AImageReader_setImageListener) X(AImageReader_acquireNextImageAsync) \
-+          X(AImage_deleteAsync) X(AImage_getHardwareBuffer)                  \
-+              X(AImage_getCropRect)
-+#define EGL_FUNCTIONS(X)                                                \
-+  X(eglGetDisplay)                                                      \
-+  X(eglInitialize) X(eglChooseConfig) X(eglCreateContext)               \
-+      X(eglCreatePbufferSurface) X(eglMakeCurrent) X(eglDestroyContext) \
-+          X(eglDestroySurface) X(eglTerminate) X(eglGetProcAddress)     \
-+              X(eglGetError)
++#define ANDROID_FUNCTIONS(X)                                            \
++  X(AHardwareBuffer_allocate)                                           \
++  X(AHardwareBuffer_release)                                            \
++  X(AHardwareBuffer_describe) X(AHardwareBuffer_sendHandleToUnixSocket) \
++      X(ANativeWindow_acquire)
++#define MEDIA_FUNCTIONS(X)                                        \
++  X(AImageReader_newWithUsage)                                    \
++  X(AImageReader_delete)                                          \
++  X(AImageReader_getWindow) X(AImageReader_setImageListener)      \
++      X(AImageReader_acquireNextImageAsync) X(AImage_deleteAsync) \
++          X(AImage_getHardwareBuffer) X(AImage_getCropRect)
++#define EGL_FUNCTIONS(X)                                            \
++  X(eglGetDisplay)                                                  \
++  X(eglInitialize)                                                  \
++  X(eglChooseConfig) X(eglCreateContext) X(eglCreatePbufferSurface) \
++      X(eglMakeCurrent) X(eglDestroyContext) X(eglDestroySurface)   \
++          X(eglTerminate) X(eglGetProcAddress) X(eglGetError)
 +#define GL_FUNCTIONS(X)                                                        \
 +  X(glGenTextures)                                                             \
-+  X(glBindTexture) X(glTexParameteri) X(glDeleteTextures) X(glGenFramebuffers) \
-+      X(glBindFramebuffer) X(glFramebufferTexture2D) X(                        \
-+          glCheckFramebufferStatus) X(glDeleteFramebuffers) X(glCreateShader)  \
-+          X(glShaderSource) X(glCompileShader) X(glGetShaderiv)                \
-+              X(glDeleteShader) X(glCreateProgram) X(glAttachShader)           \
-+                  X(glBindAttribLocation) X(glLinkProgram) X(glGetProgramiv)   \
-+                      X(glDeleteProgram) X(glUseProgram) X(glViewport)         \
-+                          X(glVertexAttribPointer)                             \
-+                              X(glEnableVertexAttribArray) X(glDrawArrays)     \
-+                                  X(glFinish) X(glGetError)                    \
-+                                      X(glGetUniformLocation) X(glUniform4f)
++  X(glBindTexture)                                                             \
++  X(glTexParameteri) X(glDeleteTextures) X(glGenFramebuffers) X(               \
++      glBindFramebuffer) X(glFramebufferTexture2D) X(glCheckFramebufferStatus) \
++      X(glDeleteFramebuffers) X(glCreateShader) X(glShaderSource)              \
++          X(glCompileShader) X(glGetShaderiv) X(glDeleteShader)                \
++              X(glCreateProgram) X(glAttachShader) X(glBindAttribLocation)     \
++                  X(glLinkProgram) X(glGetProgramiv) X(glDeleteProgram)        \
++                      X(glUseProgram) X(glViewport) X(glVertexAttribPointer)   \
++                          X(glEnableVertexAttribArray) X(glDrawArrays)         \
++                              X(glFinish) X(glGetError)                        \
++                                  X(glGetUniformLocation) X(glUniform4f)
 +
 +struct TermuxMediaCodecSurface::Impl {
++  // Function signatures are explicit because this package targets API 24.
++  // The API 26 symbols are resolved at runtime, without importing them.
++  int (*fAHardwareBuffer_allocate)(const AHardwareBuffer_Desc*,
++                                   AHardwareBuffer**) = nullptr;
++  void (*fAHardwareBuffer_release)(AHardwareBuffer*) = nullptr;
++  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
++                                    AHardwareBuffer_Desc*) = nullptr;
++  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*,
++                                                 int) = nullptr;
++  void (*fANativeWindow_acquire)(ANativeWindow*) = nullptr;
++  media_status_t (*fAImageReader_newWithUsage)(int32_t, int32_t, int32_t,
++                                               uint64_t, int32_t,
++                                               AImageReader**) = nullptr;
++  void (*fAImageReader_delete)(AImageReader*) = nullptr;
++  media_status_t (*fAImageReader_getWindow)(AImageReader*,
++                                            ANativeWindow**) = nullptr;
++  media_status_t (*fAImageReader_setImageListener)(
++      AImageReader*, AImageReader_ImageListener*) = nullptr;
++  media_status_t (*fAImageReader_acquireNextImageAsync)(AImageReader*, AImage**,
++                                                        int*) = nullptr;
++  void (*fAImage_deleteAsync)(AImage*, int) = nullptr;
++  media_status_t (*fAImage_getHardwareBuffer)(const AImage*,
++                                              AHardwareBuffer**) = nullptr;
++  media_status_t (*fAImage_getCropRect)(const AImage*,
++                                        AImageCropRect*) = nullptr;
 +#define DECLARE(name) decltype(&::name) f##name = nullptr;
-+  ANDROID_FUNCTIONS(DECLARE)
-+  MEDIA_FUNCTIONS(DECLARE)
 +  EGL_FUNCTIONS(DECLARE)
 +  GL_FUNCTIONS(DECLARE)
 +#undef DECLARE
