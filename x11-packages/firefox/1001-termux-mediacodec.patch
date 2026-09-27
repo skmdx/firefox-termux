@@ -376,7 +376,7 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,308 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -403,8 +403,7 @@
 +namespace mozilla {
 +static LazyLogModule sTermuxSurfaceLog("TermuxMediaCodec");
 +#define LOG(...) MOZ_LOG_FMT(sTermuxSurfaceLog, LogLevel::Debug, __VA_ARGS__)
-+struct TermuxMediaCodecSurface::Impl
-+{
++struct TermuxMediaCodecSurface::Impl {
 +  void* android = nullptr;
 +  void* media = nullptr;
 +  AImageReader* reader = nullptr;
@@ -415,54 +414,48 @@
 +  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
 +                                    AHardwareBuffer_Desc*);
 +  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*, int);
-+  int (*fAHardwareBuffer_lockPlanes)(AHardwareBuffer*,
-+                                     uint64_t,
-+                                     int32_t,
-+                                     const ARect*,
-+                                     AHardwareBuffer_Planes*);
++  int (*fAHardwareBuffer_lockPlanes)(AHardwareBuffer*, uint64_t, int32_t,
++                                     const ARect*, AHardwareBuffer_Planes*);
 +  int (*fAHardwareBuffer_unlock)(AHardwareBuffer*, int32_t*);
 +  void (*fANativeWindow_acquire)(ANativeWindow*);
-+  media_status_t (*fAImageReader_newWithUsage)(int32_t,
-+                                               int32_t,
-+                                               int32_t,
-+                                               uint64_t,
-+                                               int32_t,
++  media_status_t (*fAImageReader_newWithUsage)(int32_t, int32_t, int32_t,
++                                               uint64_t, int32_t,
 +                                               AImageReader**);
 +  void (*fAImageReader_delete)(AImageReader*);
 +  media_status_t (*fAImageReader_getWindow)(AImageReader*, ANativeWindow**);
 +  media_status_t (*fAImageReader_setImageListener)(AImageReader*,
 +                                                   AImageReader_ImageListener*);
-+  media_status_t (*fAImageReader_acquireNextImageAsync)(AImageReader*,
-+                                                        AImage**,
++  media_status_t (*fAImageReader_acquireNextImageAsync)(AImageReader*, AImage**,
 +                                                        int*);
 +  void (*fAImage_deleteAsync)(AImage*, int);
 +  media_status_t (*fAImage_getHardwareBuffer)(const AImage*, AHardwareBuffer**);
 +  media_status_t (*fAImage_getCropRect)(const AImage*, AImageCropRect*);
-+  struct Layout
-+  {
++  struct Layout {
 +    UniqueFileHandle fd;
 +    ino_t inode;
 +    dev_t device;
 +    uint32_t stride[2];
 +    uint32_t offset[2];
 +  };
-+  struct Lease
-+  {
++  struct Lease {
 +    AImage* image;
 +    RefPtr<DMABufSurfaceYUV> surface;
 +  };
 +  std::vector<Layout> layouts;
 +  std::vector<Lease> leases;
-+  bool Load()
-+  {
-+    android = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
++  bool Load() {
++    android = dlopen("/system/lib64/libandroid.so", RTLD_NOW | RTLD_LOCAL);
 +    media = dlopen("libmediandk.so", RTLD_NOW | RTLD_LOCAL);
-+    if (!android || !media)
++    if (!android || !media) {
++      LOG("Cannot load Android media libraries: {}", dlerror());
 +      return false;
-+#define LOAD(lib, name)                                                        \
-+  f##name = reinterpret_cast<decltype(f##name)>(dlsym(lib, #name));            \
-+  if (!f##name)                                                                \
-+    return false;
++    }
++#define LOAD(lib, name)                                             \
++  f##name = reinterpret_cast<decltype(f##name)>(dlsym(lib, #name)); \
++  if (!f##name) {                                                   \
++    LOG("Missing Android entry point: {}", #name);                  \
++    return false;                                                   \
++  }
 +    LOAD(android, AHardwareBuffer_describe)
 +    LOAD(android, AHardwareBuffer_sendHandleToUnixSocket)
 +    LOAD(android, AHardwareBuffer_lockPlanes)
@@ -480,33 +473,28 @@
 +    return true;
 +  }
 +  // Public NDK handle transfer, as used by Termux:X11's DRI3 export.
-+  int ExportFd(AHardwareBuffer* buffer)
-+  {
++  int ExportFd(AHardwareBuffer* buffer) {
 +    int sockets[2];
-+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets))
-+      return -1;
++    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets)) return -1;
 +    auto cleanup = MakeScopeExit([&] {
 +      close(sockets[0]);
 +      close(sockets[1]);
 +    });
-+    if (fAHardwareBuffer_sendHandleToUnixSocket(buffer, sockets[0]))
-+      return -1;
++    if (fAHardwareBuffer_sendHandleToUnixSocket(buffer, sockets[0])) return -1;
 +    shutdown(sockets[0], SHUT_WR);
 +    int found = -1;
 +    char data[4096];
 +    alignas(cmsghdr) char control[CMSG_SPACE(32 * sizeof(int))];
-+    iovec iov{ data, sizeof(data) };
++    iovec iov{data, sizeof(data)};
 +    for (;;) {
 +      msghdr msg{};
 +      msg.msg_iov = &iov;
 +      msg.msg_iovlen = 1;
 +      msg.msg_control = control;
 +      msg.msg_controllen = sizeof(control);
-+      if (recvmsg(sockets[1], &msg, MSG_CMSG_CLOEXEC) <= 0)
-+        break;
++      if (recvmsg(sockets[1], &msg, MSG_CMSG_CLOEXEC) <= 0) break;
 +      for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
-+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
-+          continue;
++        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
 +        int* fds = reinterpret_cast<int*>(CMSG_DATA(c));
 +        size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
 +        for (size_t i = 0; i < count; ++i) {
@@ -532,12 +520,10 @@
 +  // Map only to discover layout, once per decoder allocation. No pixels are
 +  // read or copied. Match the mapping to the exported dma-buf inode so an
 +  // implementation returning a separate staging allocation is rejected.
-+  Layout* GetLayout(AHardwareBuffer* buffer, int acquireFence)
-+  {
++  Layout* GetLayout(AHardwareBuffer* buffer, int acquireFence) {
 +    UniqueFileHandle fd(ExportFd(buffer));
 +    struct stat st{};
-+    if (!fd || fstat(fd.get(), &st))
-+      return nullptr;
++    if (!fd || fstat(fd.get(), &st)) return nullptr;
 +    for (auto& layout : layouts) {
 +      if (layout.inode == st.st_ino && layout.device == st.st_dev)
 +        return &layout;
@@ -545,48 +531,37 @@
 +    AHardwareBuffer_Planes planes{};
 +    if (fAHardwareBuffer_lockPlanes(buffer,
 +                                    AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
-+                                    acquireFence,
-+                                    nullptr,
-+                                    &planes)) {
++                                    acquireFence, nullptr, &planes)) {
 +      LOG("Cannot inspect decoder buffer plane layout");
 +      return nullptr;
 +    }
 +    auto unlock =
-+      MakeScopeExit([&] { fAHardwareBuffer_unlock(buffer, nullptr); });
++        MakeScopeExit([&] { fAHardwareBuffer_unlock(buffer, nullptr); });
 +    if (planes.planeCount != 3 || planes.planes[0].pixelStride != 1 ||
 +        planes.planes[1].pixelStride != 2 ||
 +        planes.planes[2].pixelStride != 2 ||
 +        static_cast<uint8_t*>(planes.planes[2].data) !=
-+          static_cast<uint8_t*>(planes.planes[1].data) + 1) {
++            static_cast<uint8_t*>(planes.planes[1].data) + 1) {
 +      LOG("Unsupported decoder YUV layout: planes {} steps {} {} {}",
-+          planes.planeCount,
-+          planes.planes[0].pixelStride,
-+          planes.planes[1].pixelStride,
-+          planes.planes[2].pixelStride);
++          planes.planeCount, planes.planes[0].pixelStride,
++          planes.planes[1].pixelStride, planes.planes[2].pixelStride);
 +      return nullptr;
 +    }
 +    FILE* maps = fopen("/proc/self/maps", "re");
-+    if (!maps)
-+      return nullptr;
++    if (!maps) return nullptr;
 +    auto closeMaps = MakeScopeExit([&] { fclose(maps); });
-+    Layout layout{ std::move(fd),
-+                   st.st_ino,
-+                   st.st_dev,
-+                   { planes.planes[0].rowStride, planes.planes[1].rowStride },
-+                   { 0, 0 } };
++    Layout layout{std::move(fd),
++                  st.st_ino,
++                  st.st_dev,
++                  {planes.planes[0].rowStride, planes.planes[1].rowStride},
++                  {0, 0}};
 +    bool found[2]{};
 +    char line[1024];
 +    while (fgets(line, sizeof(line), maps)) {
 +      unsigned long start, end, offset, inode;
 +      unsigned int mapMajor, mapMinor;
-+      if (sscanf(line,
-+                 "%lx-%lx %*s %lx %x:%x %lu",
-+                 &start,
-+                 &end,
-+                 &offset,
-+                 &mapMajor,
-+                 &mapMinor,
-+                 &inode) != 6 ||
++      if (sscanf(line, "%lx-%lx %*s %lx %x:%x %lu", &start, &end, &offset,
++                 &mapMajor, &mapMinor, &inode) != 6 ||
 +          inode != st.st_ino || mapMajor != major(st.st_dev) ||
 +          mapMinor != minor(st.st_dev))
 +        continue;
@@ -594,8 +569,7 @@
 +        auto address = reinterpret_cast<uintptr_t>(planes.planes[i].data);
 +        if (address >= start && address < end) {
 +          auto planeOffset = offset + address - start;
-+          if (planeOffset > UINT32_MAX)
-+            return nullptr;
++          if (planeOffset > UINT32_MAX) return nullptr;
 +          layout.offset[i] = planeOffset;
 +          found[i] = true;
 +        }
@@ -606,16 +580,12 @@
 +      return nullptr;
 +    }
 +    LOG("Decoder allocation inode {}: NV12 strides {} {} offsets {} {}",
-+        st.st_ino,
-+        layout.stride[0],
-+        layout.stride[1],
-+        layout.offset[0],
++        st.st_ino, layout.stride[0], layout.stride[1], layout.offset[0],
 +        layout.offset[1]);
 +    layouts.push_back(std::move(layout));
 +    return &layouts.back();
 +  }
-+  void ReleaseUnused()
-+  {
++  void ReleaseUnused() {
 +    for (auto it = leases.begin(); it != leases.end();) {
 +      if (!it->surface->IsGlobalRefSet()) {
 +        fAImage_deleteAsync(it->image, -1);
@@ -624,69 +594,47 @@
 +        ++it;
 +    }
 +  }
-+  ~Impl()
-+  {
++  ~Impl() {
 +    // The codec is shut down before its reader. Imported dma-buf fds retain
 +    // allocations still displayed after shutdown; the producer cannot reuse
 +    // them.
-+    for (auto& lease : leases)
-+      fAImage_deleteAsync(lease.image, -1);
-+    if (reader)
-+      fAImageReader_delete(reader);
-+    if (media)
-+      dlclose(media);
-+    if (android)
-+      dlclose(android);
++    for (auto& lease : leases) fAImage_deleteAsync(lease.image, -1);
++    if (reader) fAImageReader_delete(reader);
++    if (media) dlclose(media);
++    if (android) dlclose(android);
 +  }
 +};
 +
-+TermuxMediaCodecSurface::TermuxMediaCodecSurface()
-+  : m(MakeUnique<Impl>())
-+{
-+}
++TermuxMediaCodecSurface::TermuxMediaCodecSurface() : m(MakeUnique<Impl>()) {}
 +TermuxMediaCodecSurface::~TermuxMediaCodecSurface() = default;
-+MediaResult
-+TermuxMediaCodecSurface::Init(int aWidth, int aHeight)
-+{
++MediaResult TermuxMediaCodecSurface::Init(int aWidth, int aHeight) {
 +  if (!m->Load() ||
-+      m->fAImageReader_newWithUsage(aWidth,
-+                                    aHeight,
-+                                    AIMAGE_FORMAT_YUV_420_888,
++      m->fAImageReader_newWithUsage(aWidth, aHeight, AIMAGE_FORMAT_YUV_420_888,
 +                                    AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-+                                      AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
-+                                    16,
-+                                    &m->reader) != AMEDIA_OK ||
++                                        AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
++                                    16, &m->reader) != AMEDIA_OK ||
 +      m->fAImageReader_getWindow(m->reader, &m->window) != AMEDIA_OK) {
 +    return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
 +                       RESULT_DETAIL("YUV AImageReader initialization failed"));
 +  }
-+  AImageReader_ImageListener listener{ m.get(), [](void* data, AImageReader*) {
-+                                        auto* impl = static_cast<Impl*>(data);
-+                                        std::lock_guard<std::mutex> lock(
-+                                          impl->mutex);
-+                                        impl->available.notify_one();
-+                                      } };
++  AImageReader_ImageListener listener{
++      m.get(), [](void* data, AImageReader*) {
++        auto* impl = static_cast<Impl*>(data);
++        std::lock_guard<std::mutex> lock(impl->mutex);
++        impl->available.notify_one();
++      }};
 +  m->fAImageReader_setImageListener(m->reader, &listener);
 +  LOG("Direct YUV AImageReader ready {}x{}", aWidth, aHeight);
 +  return NS_OK;
 +}
-+void*
-+TermuxMediaCodecSurface::AcquireWindow()
-+{
++void* TermuxMediaCodecSurface::AcquireWindow() {
 +  m->fANativeWindow_acquire(m->window);
 +  return m->window;
 +}
-+void
-+TermuxMediaCodecSurface::ReleaseUnusedImages()
-+{
-+  m->ReleaseUnused();
-+}
-+already_AddRefed<layers::Image>
-+TermuxMediaCodecSurface::AcquireImage(int aWidth,
-+                                      int aHeight,
-+                                      gfx::YUVColorSpace aColorSpace,
-+                                      gfx::ColorRange aColorRange)
-+{
++void TermuxMediaCodecSurface::ReleaseUnusedImages() { m->ReleaseUnused(); }
++already_AddRefed<layers::Image> TermuxMediaCodecSurface::AcquireImage(
++    int aWidth, int aHeight, gfx::YUVColorSpace aColorSpace,
++    gfx::ColorRange aColorRange) {
 +  m->ReleaseUnused();
 +  AImage* image = nullptr;
 +  int acquireFd = -1;
@@ -695,68 +643,51 @@
 +    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 +    for (;;) {
 +      media_status_t status =
-+        m->fAImageReader_acquireNextImageAsync(m->reader, &image, &acquireFd);
-+      if (status == AMEDIA_OK)
-+        break;
++          m->fAImageReader_acquireNextImageAsync(m->reader, &image, &acquireFd);
++      if (status == AMEDIA_OK) break;
 +      if (status != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE ||
 +          m->available.wait_until(lock, deadline) == std::cv_status::timeout) {
 +        LOG("AImageReader acquire failed {} outstanding {}",
-+            static_cast<int>(status),
-+            m->leases.size());
++            static_cast<int>(status), m->leases.size());
 +        return nullptr;
 +      }
 +    }
 +  }
 +  UniqueFileHandle fence(acquireFd);
 +  auto release =
-+    MakeScopeExit([&] { m->fAImage_deleteAsync(image, fence.release()); });
++      MakeScopeExit([&] { m->fAImage_deleteAsync(image, fence.release()); });
 +  AHardwareBuffer* buffer = nullptr;
 +  AImageCropRect crop{};
 +  if (m->fAImage_getHardwareBuffer(image, &buffer) != AMEDIA_OK ||
 +      m->fAImage_getCropRect(image, &crop) != AMEDIA_OK)
 +    return nullptr;
 +  auto* layout = m->GetLayout(buffer, acquireFd);
-+  if (!layout)
-+    return nullptr;
++  if (!layout) return nullptr;
 +  if (crop.left % 2 || crop.top % 2 || crop.right - crop.left != aWidth ||
 +      crop.bottom - crop.top != aHeight) {
-+    LOG("Unsupported crop {} {} {} {} for {}x{}",
-+        crop.left,
-+        crop.top,
-+        crop.right,
-+        crop.bottom,
-+        aWidth,
-+        aHeight);
++    LOG("Unsupported crop {} {} {} {} for {}x{}", crop.left, crop.top,
++        crop.right, crop.bottom, aWidth, aHeight);
 +    return nullptr;
 +  }
 +  uint32_t offsets[2] = {
-+    layout->offset[0] + crop.top * layout->stride[0] + crop.left,
-+    layout->offset[1] + (crop.top / 2) * layout->stride[1] + crop.left
-+  };
-+  RefPtr<DMABufSurfaceYUV> surface =
-+    DMABufSurfaceYUV::CreateFromNV12(UniqueFileHandle(dup(layout->fd.get())),
-+                                     std::move(fence),
-+                                     aWidth,
-+                                     aHeight,
-+                                     layout->stride,
-+                                     offsets);
++      layout->offset[0] + crop.top * layout->stride[0] + crop.left,
++      layout->offset[1] + (crop.top / 2) * layout->stride[1] + crop.left};
++  RefPtr<DMABufSurfaceYUV> surface = DMABufSurfaceYUV::CreateFromNV12(
++      UniqueFileHandle(dup(layout->fd.get())), std::move(fence), aWidth,
++      aHeight, layout->stride, offsets);
 +  surface->SetYUVColorSpace(aColorSpace);
 +  surface->SetColorRange(aColorRange);
-+  m->leases.push_back({ image, surface });
++  m->leases.push_back({image, surface});
 +  release.release();
-+  LOG("Zero-copy NV12 {}x{} inode {} -> DMABuf {} outstanding {}",
-+      aWidth,
-+      aHeight,
-+      layout->inode,
-+      surface->GetUID(),
-+      m->leases.size());
++  LOG("Zero-copy NV12 {}x{} inode {} -> DMABuf {} outstanding {}", aWidth,
++      aHeight, layout->inode, surface->GetUID(), m->leases.size());
 +  RefPtr<layers::Image> result = new layers::DMABUFSurfaceImage(surface);
 +  return result.forget();
 +}
-+} // namespace mozilla
++}  // namespace mozilla
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,34 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -774,24 +705,22 @@
 +}
 +
 +// Direct decoder YUV dma-buf output, independent of GeckoView/JNI.
-+class TermuxMediaCodecSurface final
-+{
-+public:
++class TermuxMediaCodecSurface final {
++ public:
 +  TermuxMediaCodecSurface();
 +  ~TermuxMediaCodecSurface();
 +  MediaResult Init(int aWidth, int aHeight);
 +  void* AcquireWindow();
 +  void ReleaseUnusedImages();
-+  already_AddRefed<layers::Image> AcquireImage(int aWidth,
-+                                               int aHeight,
++  already_AddRefed<layers::Image> AcquireImage(int aWidth, int aHeight,
 +                                               gfx::YUVColorSpace aColorSpace,
 +                                               gfx::ColorRange aColorRange);
 +
-+private:
++ private:
 +  struct Impl;
 +  UniquePtr<Impl> m;
 +};
-+} // namespace mozilla
++}  // namespace mozilla
 +#endif
 --- a/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
 +++ b/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
