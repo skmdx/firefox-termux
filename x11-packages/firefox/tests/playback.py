@@ -197,6 +197,7 @@ def main():
         result['mediacodec'] = 'MediaCodec FFmpeg init successful' in logs
         result['software_init'] = 'init, IsHardwareAccelerated=false' in logs
         result['gpu_frames'] = logs.count('GPU blit ')
+        result['zero_copy_frames'] = logs.count('Zero-copy NV12 ')
         slots = re.findall(r'Allocated RGBA pool slot (\d+)', logs)
         result['pool_slots'] = max(map(int, slots), default=-1) + 1
         result['pool_allocations'] = len(slots)
@@ -209,8 +210,9 @@ def main():
             and result['mediacodec'] != args.software
             and (result['software_init'] if args.software else not result['software_init']))
         result['passed'] = bool(result['passed']
-            and (args.software or ((args.cpu_buffer or args.expect_cpu) and result['gpu_frames'] == 0)
-                 or (not args.cpu_buffer and not args.expect_cpu and result['gpu_frames'] >= expected_frames))
+            and result['gpu_frames'] == 0
+            and (args.software or ((args.cpu_buffer or args.expect_cpu) and result['zero_copy_frames'] == 0)
+                 or (not args.cpu_buffer and not args.expect_cpu and result['zero_copy_frames'] >= expected_frames))
             and all(e['width'] == metadata['width'] and e['height'] == metadata['height'] and not e['error']
                     for e in result.get('events', []))
             and result.get('events', [{}])[0].get('decoded', 0) >= expected_frames

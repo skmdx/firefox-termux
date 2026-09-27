@@ -162,7 +162,17 @@
  }
  #endif  // MOZ_USE_HWDECODE
 
-@@ -1654,7 +1675,17 @@
+@@ -1578,6 +1599,9 @@
+     mShouldResumeDrain = true;
+   }
+ #  endif
++#  ifdef MOZ_TERMUX_MEDIACODEC
++  if (mTermuxSurface) mTermuxSurface->ReleaseUnusedImages();
++#  endif
+   if (aData || !mHasSentDrainPacket) {
+     packet->duration = aSample->mDuration.ToMicroseconds();
+     int res = mLib->avcodec_send_packet(mCodecContext, packet);
+@@ -1654,7 +1678,17 @@
 
      MediaResult rv;
  #  ifdef MOZ_USE_HWDECODE
@@ -181,7 +191,7 @@
  #    ifdef MOZ_WIDGET_GTK
        mDecodeStats.UpdateDecodeTimes(Duration(mFrame));
        if (mDecodeStats.IsDecodingSlow() &&
-@@ -1990,6 +2021,19 @@
+@@ -1990,6 +2024,19 @@
    b.mPlanes[0].mSkip = 0;
    b.mPlanes[1].mSkip = 0;
    b.mPlanes[2].mSkip = 0;
@@ -201,7 +211,7 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
-@@ -2543,6 +2587,8 @@
+@@ -2543,6 +2590,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
    ReleaseFramesMediaCodec();
@@ -210,7 +220,7 @@
    if (mMediaCodecDeviceContext) {
      mLib->av_buffer_unref(&mMediaCodecDeviceContext);
    }
-@@ -2561,6 +2607,9 @@
+@@ -2561,6 +2610,9 @@
    // 3. av_buffer_unref(&mVulkanDeviceContext) — may be the last ref and call
    //    vkDestroyDevice, so it must come after Cleanup().
    FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
@@ -220,7 +230,7 @@
  #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
    if (IsHardwareAccelerated()) {
  #  if LIBAVCODEC_VERSION_MAJOR >= 60 && !defined(FFVPX_VERSION)
-@@ -2587,7 +2636,9 @@
+@@ -2587,7 +2639,9 @@
 
  bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
      nsACString& aFailureReason) const {
@@ -231,7 +241,7 @@
    return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
  #elif defined(MOZ_ENABLE_D3D11VA)
    return !!mD3D11VADeviceContext;
-@@ -3047,15 +3098,20 @@
+@@ -3047,15 +3101,20 @@
  }
  #  endif
 
@@ -252,7 +262,7 @@
 
    if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3087,6 +3143,9 @@
+@@ -3087,6 +3146,9 @@
      if (mMediaCodecDeviceContext) {
        mLib->av_buffer_unref(&mMediaCodecDeviceContext);
      }
@@ -262,26 +272,13 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3161,33 @@
+@@ -3102,6 +3164,20 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
 +#  ifdef MOZ_TERMUX_MEDIACODEC
 +  if (StaticPrefs::media_ffmpeg_mediacodec_surface_enabled() && mImageAllocator &&
 +      mImageAllocator->UsingHardwareWebRender()) {
-+    // Both EGL implementations have the same SONAME. Pin Gecko's Mesa loader
-+    // before loading Android EGL so later canvas snapshots keep using Mesa.
-+    nsCString failureId;
-+    if (!gl::GLLibraryEGL::Get(&failureId)) {
-+      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-+                         RESULT_DETAIL("Gecko EGL initialization failed"));
-+    }
-+    mReleaseMediaCodecBuffer = reinterpret_cast<decltype(mReleaseMediaCodecBuffer)>(
-+        PR_FindSymbol(mLib->mAVCodecLib, "av_mediacodec_release_buffer"));
-+    if (!mReleaseMediaCodecBuffer) {
-+      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-+                         RESULT_DETAIL("MediaCodec release symbol is unavailable"));
-+    }
 +    mTermuxSurface = MakeUnique<TermuxMediaCodecSurface>();
 +    MediaResult rv = mTermuxSurface->Init(mInfo.mImage.width, mInfo.mImage.height);
 +    if (NS_FAILED(rv)) {
@@ -296,7 +293,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3242,7 @@
+@@ -3156,6 +3232,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -304,7 +301,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3275,30 @@
+@@ -3188,7 +3265,30 @@
    releaseResources.release();
    return NS_OK;
  }
@@ -319,7 +316,7 @@
 +    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
 +                       RESULT_DETAIL("MediaCodec Surface frame release failed"));
 +  }
-+  RefPtr<layers::Image> image = mTermuxSurface->AcquireImage(mFrame->width, mFrame->height);
++  RefPtr<layers::Image> image = mTermuxSurface->AcquireImage(mFrame->width, mFrame->height, GetFrameColorSpace(), GetFrameColorRange());
 +  if (!image) {
 +    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
 +                       RESULT_DETAIL("MediaCodec GPU image conversion failed"));
@@ -379,264 +376,137 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,377 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "TermuxMediaCodecSurface.h"
-+
-+#define EGL_NO_PLATFORM_SPECIFIC_TYPES
-+#include <EGL/egl.h>
-+#include <EGL/eglext.h>
-+#include <GLES2/gl2.h>
-+#include <GLES2/gl2ext.h>
-+#include <android/hardware_buffer.h>
-+#include <android/native_window.h>
-+#include <dlfcn.h>
-+#include <media/NdkImageReader.h>
-+#include <sys/socket.h>
-+#include <unistd.h>
-+
-+#include <chrono>
-+#include <condition_variable>
-+#include <mutex>
-+#include <vector>
-+
 +#include "mozilla/Logging.h"
 +#include "mozilla/ScopeExit.h"
 +#include "mozilla/UniquePtrExtensions.h"
-+#include "mozilla/gfx/FileHandleWrapper.h"
 +#include "mozilla/layers/DMABUFSurfaceImage.h"
 +#include "mozilla/widget/DMABufSurface.h"
++#include <android/hardware_buffer.h>
++#include <android/native_window.h>
++#include <chrono>
++#include <condition_variable>
++#include <dlfcn.h>
++#include <media/NdkImageReader.h>
++#include <mutex>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <unistd.h>
++#include <vector>
 +
 +namespace mozilla {
 +static LazyLogModule sTermuxSurfaceLog("TermuxMediaCodec");
 +#define LOG(...) MOZ_LOG_FMT(sTermuxSurfaceLog, LogLevel::Debug, __VA_ARGS__)
-+
-+#define ANDROID_FUNCTIONS(X)  \
-+  X(AHardwareBuffer_allocate) \
-+  X(AHardwareBuffer_release)  \
-+  X(AHardwareBuffer_describe) \
-+  X(AHardwareBuffer_sendHandleToUnixSocket) X(ANativeWindow_acquire)
-+#define MEDIA_FUNCTIONS(X)              \
-+  X(AImageReader_newWithUsage)          \
-+  X(AImageReader_delete)                \
-+  X(AImageReader_getWindow)             \
-+  X(AImageReader_setImageListener)      \
-+  X(AImageReader_acquireNextImageAsync) \
-+  X(AImage_deleteAsync) X(AImage_getHardwareBuffer) X(AImage_getCropRect)
-+#define EGL_FUNCTIONS(X)                                                      \
-+  X(eglGetDisplay)                                                            \
-+  X(eglInitialize)                                                            \
-+  X(eglChooseConfig)                                                          \
-+  X(eglCreateContext)                                                         \
-+  X(eglCreatePbufferSurface)                                                  \
-+  X(eglMakeCurrent) X(eglDestroyContext) X(eglDestroySurface) X(eglTerminate) \
-+      X(eglGetProcAddress) X(eglGetError)
-+#define GL_FUNCTIONS(X)                                                      \
-+  X(glGenTextures)                                                           \
-+  X(glBindTexture)                                                           \
-+  X(glTexParameteri)                                                         \
-+  X(glDeleteTextures)                                                        \
-+  X(glGenFramebuffers)                                                       \
-+  X(glBindFramebuffer) X(glFramebufferTexture2D) X(glCheckFramebufferStatus) \
-+      X(glDeleteFramebuffers) X(glCreateShader) X(glShaderSource)            \
-+          X(glCompileShader) X(glGetShaderiv) X(glDeleteShader)              \
-+              X(glCreateProgram) X(glAttachShader) X(glBindAttribLocation)   \
-+                  X(glLinkProgram) X(glGetProgramiv) X(glDeleteProgram)      \
-+                      X(glUseProgram) X(glViewport) X(glVertexAttribPointer) \
-+                          X(glEnableVertexAttribArray) X(glDrawArrays)       \
-+                              X(glFinish) X(glFlush) X(glGetError)           \
-+                                  X(glGetUniformLocation) X(glUniform4f)
-+
-+struct TermuxMediaCodecSurface::Impl {
-+  // Function signatures are explicit because this package targets API 24.
-+  // The API 26 symbols are resolved at runtime, without importing them.
-+  int (*fAHardwareBuffer_allocate)(const AHardwareBuffer_Desc*,
-+                                   AHardwareBuffer**) = nullptr;
-+  void (*fAHardwareBuffer_release)(AHardwareBuffer*) = nullptr;
-+  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
-+                                    AHardwareBuffer_Desc*) = nullptr;
-+  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*,
-+                                                 int) = nullptr;
-+  void (*fANativeWindow_acquire)(ANativeWindow*) = nullptr;
-+  media_status_t (*fAImageReader_newWithUsage)(int32_t, int32_t, int32_t,
-+                                               uint64_t, int32_t,
-+                                               AImageReader**) = nullptr;
-+  void (*fAImageReader_delete)(AImageReader*) = nullptr;
-+  media_status_t (*fAImageReader_getWindow)(AImageReader*,
-+                                            ANativeWindow**) = nullptr;
-+  media_status_t (*fAImageReader_setImageListener)(
-+      AImageReader*, AImageReader_ImageListener*) = nullptr;
-+  media_status_t (*fAImageReader_acquireNextImageAsync)(AImageReader*, AImage**,
-+                                                        int*) = nullptr;
-+  void (*fAImage_deleteAsync)(AImage*, int) = nullptr;
-+  media_status_t (*fAImage_getHardwareBuffer)(const AImage*,
-+                                              AHardwareBuffer**) = nullptr;
-+  media_status_t (*fAImage_getCropRect)(const AImage*,
-+                                        AImageCropRect*) = nullptr;
-+#define DECLARE(name) decltype(&::name) f##name = nullptr;
-+  EGL_FUNCTIONS(DECLARE)
-+  GL_FUNCTIONS(DECLARE)
-+#undef DECLARE
-+  PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC getClientBuffer = nullptr;
-+  PFNEGLCREATEIMAGEKHRPROC createImage = nullptr;
-+  PFNEGLDESTROYIMAGEKHRPROC destroyImage = nullptr;
-+  PFNGLEGLIMAGETARGETTEXTURE2DOESPROC imageTarget = nullptr;
-+  PFNEGLCREATESYNCKHRPROC createSync = nullptr;
-+  PFNEGLDESTROYSYNCKHRPROC destroySync = nullptr;
-+  PFNEGLWAITSYNCKHRPROC waitSync = nullptr;
-+  PFNEGLDUPNATIVEFENCEFDANDROIDPROC dupFence = nullptr;
++struct TermuxMediaCodecSurface::Impl
++{
 +  void* android = nullptr;
 +  void* media = nullptr;
-+  void* egl = nullptr;
-+  void* gl = nullptr;
 +  AImageReader* reader = nullptr;
 +  ANativeWindow* window = nullptr;
-+  EGLDisplay display = EGL_NO_DISPLAY;
-+  EGLContext context = EGL_NO_CONTEXT;
-+  EGLSurface pbuffer = EGL_NO_SURFACE;
-+  GLuint program = 0;
 +  std::mutex mutex;
 +  std::condition_variable available;
-+  struct OutputSlot {
-+    AHardwareBuffer* buffer = nullptr;
-+    AHardwareBuffer_Desc desc{};
++  // Resolve newer NDK entry points dynamically; the package targets API 24.
++  void (*fAHardwareBuffer_describe)(const AHardwareBuffer*,
++                                    AHardwareBuffer_Desc*);
++  int (*fAHardwareBuffer_sendHandleToUnixSocket)(const AHardwareBuffer*, int);
++  int (*fAHardwareBuffer_lockPlanes)(AHardwareBuffer*,
++                                     uint64_t,
++                                     int32_t,
++                                     const ARect*,
++                                     AHardwareBuffer_Planes*);
++  int (*fAHardwareBuffer_unlock)(AHardwareBuffer*, int32_t*);
++  void (*fANativeWindow_acquire)(ANativeWindow*);
++  media_status_t (*fAImageReader_newWithUsage)(int32_t,
++                                               int32_t,
++                                               int32_t,
++                                               uint64_t,
++                                               int32_t,
++                                               AImageReader**);
++  void (*fAImageReader_delete)(AImageReader*);
++  media_status_t (*fAImageReader_getWindow)(AImageReader*, ANativeWindow**);
++  media_status_t (*fAImageReader_setImageListener)(AImageReader*,
++                                                   AImageReader_ImageListener*);
++  media_status_t (*fAImageReader_acquireNextImageAsync)(AImageReader*,
++                                                        AImage**,
++                                                        int*);
++  void (*fAImage_deleteAsync)(AImage*, int);
++  media_status_t (*fAImage_getHardwareBuffer)(const AImage*, AHardwareBuffer**);
++  media_status_t (*fAImage_getCropRect)(const AImage*, AImageCropRect*);
++  struct Layout
++  {
 +    UniqueFileHandle fd;
-+    RefPtr<DMABufSurfaceRGBA> lastSurface;
++    ino_t inode;
++    dev_t device;
++    uint32_t stride[2];
++    uint32_t offset[2];
 +  };
-+  std::vector<OutputSlot> outputs;
-+
-+  bool Load() {
++  struct Lease
++  {
++    AImage* image;
++    RefPtr<DMABufSurfaceYUV> surface;
++  };
++  std::vector<Layout> layouts;
++  std::vector<Lease> leases;
++  bool Load()
++  {
 +    android = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
 +    media = dlopen("libmediandk.so", RTLD_NOW | RTLD_LOCAL);
-+    egl = dlopen("/system/lib64/libEGL.so", RTLD_NOW | RTLD_LOCAL);
-+    gl = dlopen("/system/lib64/libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
-+    if (!android || !media || !egl || !gl) return false;
-+#define LOAD(lib, name)                                             \
-+  f##name = reinterpret_cast<decltype(f##name)>(dlsym(lib, #name)); \
-+  if (!f##name) return false;
-+#define A(name) LOAD(android, name)
-+    ANDROID_FUNCTIONS(A)
-+#undef A
-+#define A(name) LOAD(media, name)
-+    MEDIA_FUNCTIONS(A)
-+#undef A
-+#define A(name) LOAD(egl, name)
-+    EGL_FUNCTIONS(A)
-+#undef A
-+#define A(name) LOAD(gl, name)
-+    GL_FUNCTIONS(A)
-+#undef A
++    if (!android || !media)
++      return false;
++#define LOAD(lib, name)                                                        \
++  f##name = reinterpret_cast<decltype(f##name)>(dlsym(lib, #name));            \
++  if (!f##name)                                                                \
++    return false;
++    LOAD(android, AHardwareBuffer_describe)
++    LOAD(android, AHardwareBuffer_sendHandleToUnixSocket)
++    LOAD(android, AHardwareBuffer_lockPlanes)
++    LOAD(android, AHardwareBuffer_unlock)
++    LOAD(android, ANativeWindow_acquire)
++    LOAD(media, AImageReader_newWithUsage)
++    LOAD(media, AImageReader_delete)
++    LOAD(media, AImageReader_getWindow)
++    LOAD(media, AImageReader_setImageListener)
++    LOAD(media, AImageReader_acquireNextImageAsync)
++    LOAD(media, AImage_deleteAsync)
++    LOAD(media, AImage_getHardwareBuffer)
++    LOAD(media, AImage_getCropRect)
 +#undef LOAD
-+#define EXT(member, name)                                                \
-+  member = reinterpret_cast<decltype(member)>(feglGetProcAddress(name)); \
-+  if (!member) return false;
-+    EXT(getClientBuffer, "eglGetNativeClientBufferANDROID")
-+    EXT(createImage, "eglCreateImageKHR")
-+    EXT(destroyImage, "eglDestroyImageKHR")
-+    EXT(imageTarget, "glEGLImageTargetTexture2DOES")
-+    EXT(createSync, "eglCreateSyncKHR")
-+    EXT(destroySync, "eglDestroySyncKHR")
-+    EXT(waitSync, "eglWaitSyncKHR")
-+    EXT(dupFence, "eglDupNativeFenceFDANDROID")
-+#undef EXT
 +    return true;
 +  }
-+
-+  bool Current() { return feglMakeCurrent(display, pbuffer, pbuffer, context); }
-+
-+  GLuint Shader(GLenum type, const char* text) {
-+    GLuint shader = fglCreateShader(type);
-+    fglShaderSource(shader, 1, &text, nullptr);
-+    fglCompileShader(shader);
-+    GLint compiled = 0;
-+    fglGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
-+    if (!compiled) {
-+      fglDeleteShader(shader);
-+      return 0;
-+    }
-+    return shader;
-+  }
-+
-+  bool InitGL() {
-+    display = feglGetDisplay(EGL_DEFAULT_DISPLAY);
-+    if (display == EGL_NO_DISPLAY || !feglInitialize(display, nullptr, nullptr))
-+      return false;
-+    const EGLint configAttrs[] = {EGL_SURFACE_TYPE,
-+                                  EGL_PBUFFER_BIT,
-+                                  EGL_RENDERABLE_TYPE,
-+                                  EGL_OPENGL_ES2_BIT,
-+                                  EGL_RED_SIZE,
-+                                  8,
-+                                  EGL_GREEN_SIZE,
-+                                  8,
-+                                  EGL_BLUE_SIZE,
-+                                  8,
-+                                  EGL_ALPHA_SIZE,
-+                                  8,
-+                                  EGL_NONE};
-+    EGLConfig config;
-+    EGLint count = 0;
-+    if (!feglChooseConfig(display, configAttrs, &config, 1, &count) || !count)
-+      return false;
-+    const EGLint contextAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-+    context = feglCreateContext(display, config, EGL_NO_CONTEXT, contextAttrs);
-+    const EGLint surfaceAttrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-+    pbuffer = feglCreatePbufferSurface(display, config, surfaceAttrs);
-+    if (context == EGL_NO_CONTEXT || pbuffer == EGL_NO_SURFACE || !Current())
-+      return false;
-+    const char* vs =
-+        "attribute vec2 pos; varying vec2 uv; uniform vec4 crop;"
-+        "void "
-+        "main(){gl_Position=vec4(pos,0.,1.);uv=(pos*.5+.5)*crop.zw+crop.xy;}";
-+    const char* fs =
-+        "#extension GL_OES_EGL_image_external : require\n"
-+        "precision mediump float; varying vec2 uv; uniform samplerExternalOES "
-+        "tex;"
-+        "void main(){gl_FragColor=texture2D(tex,uv);}";
-+    GLuint vertex = Shader(GL_VERTEX_SHADER, vs),
-+           fragment = Shader(GL_FRAGMENT_SHADER, fs);
-+    auto cleanup = MakeScopeExit([&] {
-+      fglDeleteShader(vertex);
-+      fglDeleteShader(fragment);
-+    });
-+    if (!vertex || !fragment) return false;
-+    program = fglCreateProgram();
-+    fglAttachShader(program, vertex);
-+    fglAttachShader(program, fragment);
-+    fglBindAttribLocation(program, 0, "pos");
-+    fglLinkProgram(program);
-+    GLint linked = 0;
-+    fglGetProgramiv(program, GL_LINK_STATUS, &linked);
-+    feglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-+    return linked;
-+  }
-+
 +  // Public NDK handle transfer, as used by Termux:X11's DRI3 export.
-+  int ExportFd(AHardwareBuffer* buffer) {
++  int ExportFd(AHardwareBuffer* buffer)
++  {
 +    int sockets[2];
-+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets)) return -1;
++    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets))
++      return -1;
 +    auto cleanup = MakeScopeExit([&] {
 +      close(sockets[0]);
 +      close(sockets[1]);
 +    });
-+    if (fAHardwareBuffer_sendHandleToUnixSocket(buffer, sockets[0])) return -1;
++    if (fAHardwareBuffer_sendHandleToUnixSocket(buffer, sockets[0]))
++      return -1;
 +    shutdown(sockets[0], SHUT_WR);
 +    int found = -1;
 +    char data[4096];
 +    alignas(cmsghdr) char control[CMSG_SPACE(32 * sizeof(int))];
-+    iovec iov{data, sizeof(data)};
++    iovec iov{ data, sizeof(data) };
 +    for (;;) {
 +      msghdr msg{};
 +      msg.msg_iov = &iov;
 +      msg.msg_iovlen = 1;
 +      msg.msg_control = control;
 +      msg.msg_controllen = sizeof(control);
-+      if (recvmsg(sockets[1], &msg, MSG_CMSG_CLOEXEC) <= 0) break;
++      if (recvmsg(sockets[1], &msg, MSG_CMSG_CLOEXEC) <= 0)
++        break;
 +      for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
-+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
++        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
++          continue;
 +        int* fds = reinterpret_cast<int*>(CMSG_DATA(c));
 +        size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
 +        for (size_t i = 0; i < count; ++i) {
@@ -659,58 +529,165 @@
 +    return found;
 +  }
 +
-+  ~Impl() {
-+    if (reader) fAImageReader_delete(reader);
-+    for (auto& slot : outputs) {
-+      if (slot.buffer) fAHardwareBuffer_release(slot.buffer);
++  // Map only to discover layout, once per decoder allocation. No pixels are
++  // read or copied. Match the mapping to the exported dma-buf inode so an
++  // implementation returning a separate staging allocation is rejected.
++  Layout* GetLayout(AHardwareBuffer* buffer, int acquireFence)
++  {
++    UniqueFileHandle fd(ExportFd(buffer));
++    struct stat st{};
++    if (!fd || fstat(fd.get(), &st))
++      return nullptr;
++    for (auto& layout : layouts) {
++      if (layout.inode == st.st_ino && layout.device == st.st_dev)
++        return &layout;
 +    }
-+    if (context != EGL_NO_CONTEXT && Current()) {
-+      if (program) fglDeleteProgram(program);
-+      feglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    AHardwareBuffer_Planes planes{};
++    if (fAHardwareBuffer_lockPlanes(buffer,
++                                    AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
++                                    acquireFence,
++                                    nullptr,
++                                    &planes)) {
++      LOG("Cannot inspect decoder buffer plane layout");
++      return nullptr;
 +    }
-+    if (pbuffer != EGL_NO_SURFACE) feglDestroySurface(display, pbuffer);
-+    if (context != EGL_NO_CONTEXT) feglDestroyContext(display, context);
-+    if (display != EGL_NO_DISPLAY) feglTerminate(display);
-+    if (gl) dlclose(gl);
-+    if (egl) dlclose(egl);
-+    if (media) dlclose(media);
-+    if (android) dlclose(android);
++    auto unlock =
++      MakeScopeExit([&] { fAHardwareBuffer_unlock(buffer, nullptr); });
++    if (planes.planeCount != 3 || planes.planes[0].pixelStride != 1 ||
++        planes.planes[1].pixelStride != 2 ||
++        planes.planes[2].pixelStride != 2 ||
++        static_cast<uint8_t*>(planes.planes[2].data) !=
++          static_cast<uint8_t*>(planes.planes[1].data) + 1) {
++      LOG("Unsupported decoder YUV layout: planes {} steps {} {} {}",
++          planes.planeCount,
++          planes.planes[0].pixelStride,
++          planes.planes[1].pixelStride,
++          planes.planes[2].pixelStride);
++      return nullptr;
++    }
++    FILE* maps = fopen("/proc/self/maps", "re");
++    if (!maps)
++      return nullptr;
++    auto closeMaps = MakeScopeExit([&] { fclose(maps); });
++    Layout layout{ std::move(fd),
++                   st.st_ino,
++                   st.st_dev,
++                   { planes.planes[0].rowStride, planes.planes[1].rowStride },
++                   { 0, 0 } };
++    bool found[2]{};
++    char line[1024];
++    while (fgets(line, sizeof(line), maps)) {
++      unsigned long start, end, offset, inode;
++      unsigned int mapMajor, mapMinor;
++      if (sscanf(line,
++                 "%lx-%lx %*s %lx %x:%x %lu",
++                 &start,
++                 &end,
++                 &offset,
++                 &mapMajor,
++                 &mapMinor,
++                 &inode) != 6 ||
++          inode != st.st_ino || mapMajor != major(st.st_dev) ||
++          mapMinor != minor(st.st_dev))
++        continue;
++      for (int i = 0; i < 2; ++i) {
++        auto address = reinterpret_cast<uintptr_t>(planes.planes[i].data);
++        if (address >= start && address < end) {
++          auto planeOffset = offset + address - start;
++          if (planeOffset > UINT32_MAX)
++            return nullptr;
++          layout.offset[i] = planeOffset;
++          found[i] = true;
++        }
++      }
++    }
++    if (!found[0] || !found[1]) {
++      LOG("Decoder planes do not map the exported dma-buf inode {}", st.st_ino);
++      return nullptr;
++    }
++    LOG("Decoder allocation inode {}: NV12 strides {} {} offsets {} {}",
++        st.st_ino,
++        layout.stride[0],
++        layout.stride[1],
++        layout.offset[0],
++        layout.offset[1]);
++    layouts.push_back(std::move(layout));
++    return &layouts.back();
++  }
++  void ReleaseUnused()
++  {
++    for (auto it = leases.begin(); it != leases.end();) {
++      if (!it->surface->IsGlobalRefSet()) {
++        fAImage_deleteAsync(it->image, -1);
++        it = leases.erase(it);
++      } else
++        ++it;
++    }
++  }
++  ~Impl()
++  {
++    // The codec is shut down before its reader. Imported dma-buf fds retain
++    // allocations still displayed after shutdown; the producer cannot reuse
++    // them.
++    for (auto& lease : leases)
++      fAImage_deleteAsync(lease.image, -1);
++    if (reader)
++      fAImageReader_delete(reader);
++    if (media)
++      dlclose(media);
++    if (android)
++      dlclose(android);
 +  }
 +};
 +
-+TermuxMediaCodecSurface::TermuxMediaCodecSurface() : m(MakeUnique<Impl>()) {}
++TermuxMediaCodecSurface::TermuxMediaCodecSurface()
++  : m(MakeUnique<Impl>())
++{
++}
 +TermuxMediaCodecSurface::~TermuxMediaCodecSurface() = default;
-+
-+MediaResult TermuxMediaCodecSurface::Init(int aWidth, int aHeight) {
-+  if (!m->Load() || !m->InitGL()) {
-+    return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-+                       RESULT_DETAIL("Android EGL initialization failed"));
-+  }
-+  if (m->fAImageReader_newWithUsage(aWidth, aHeight, AIMAGE_FORMAT_PRIVATE,
-+                                    AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, 4,
++MediaResult
++TermuxMediaCodecSurface::Init(int aWidth, int aHeight)
++{
++  if (!m->Load() ||
++      m->fAImageReader_newWithUsage(aWidth,
++                                    aHeight,
++                                    AIMAGE_FORMAT_YUV_420_888,
++                                    AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
++                                      AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
++                                    16,
 +                                    &m->reader) != AMEDIA_OK ||
 +      m->fAImageReader_getWindow(m->reader, &m->window) != AMEDIA_OK) {
 +    return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-+                       RESULT_DETAIL("AImageReader initialization failed"));
++                       RESULT_DETAIL("YUV AImageReader initialization failed"));
 +  }
-+  AImageReader_ImageListener listener{
-+      m.get(), [](void* data, AImageReader*) {
-+        auto* impl = static_cast<Impl*>(data);
-+        std::lock_guard<std::mutex> lock(impl->mutex);
-+        impl->available.notify_one();
-+      }};
++  AImageReader_ImageListener listener{ m.get(), [](void* data, AImageReader*) {
++                                        auto* impl = static_cast<Impl*>(data);
++                                        std::lock_guard<std::mutex> lock(
++                                          impl->mutex);
++                                        impl->available.notify_one();
++                                      } };
 +  m->fAImageReader_setImageListener(m->reader, &listener);
-+  LOG("Android EGL and PRIVATE AImageReader ready {}x{}", aWidth, aHeight);
++  LOG("Direct YUV AImageReader ready {}x{}", aWidth, aHeight);
 +  return NS_OK;
 +}
-+
-+void* TermuxMediaCodecSurface::AcquireWindow() {
++void*
++TermuxMediaCodecSurface::AcquireWindow()
++{
 +  m->fANativeWindow_acquire(m->window);
 +  return m->window;
 +}
-+
-+already_AddRefed<layers::Image> TermuxMediaCodecSurface::AcquireImage(
-+    int aWidth, int aHeight) {
++void
++TermuxMediaCodecSurface::ReleaseUnusedImages()
++{
++  m->ReleaseUnused();
++}
++already_AddRefed<layers::Image>
++TermuxMediaCodecSurface::AcquireImage(int aWidth,
++                                      int aHeight,
++                                      gfx::YUVColorSpace aColorSpace,
++                                      gfx::ColorRange aColorRange)
++{
++  m->ReleaseUnused();
 +  AImage* image = nullptr;
 +  int acquireFd = -1;
 +  {
@@ -718,167 +695,68 @@
 +    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 +    for (;;) {
 +      media_status_t status =
-+          m->fAImageReader_acquireNextImageAsync(m->reader, &image, &acquireFd);
-+      if (status == AMEDIA_OK) break;
++        m->fAImageReader_acquireNextImageAsync(m->reader, &image, &acquireFd);
++      if (status == AMEDIA_OK)
++        break;
 +      if (status != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE ||
 +          m->available.wait_until(lock, deadline) == std::cv_status::timeout) {
-+        LOG("AImageReader acquire failed {}", static_cast<int>(status));
++        LOG("AImageReader acquire failed {} outstanding {}",
++            static_cast<int>(status),
++            m->leases.size());
 +        return nullptr;
 +      }
 +    }
 +  }
-+  int releaseFence = -1;
-+  auto releaseImage =
-+      MakeScopeExit([&] { m->fAImage_deleteAsync(image, releaseFence); });
-+  if (!m->Current()) {
-+    if (acquireFd >= 0) close(acquireFd);
-+    return nullptr;
-+  }
-+  auto unbind = MakeScopeExit([&] {
-+    m->feglMakeCurrent(m->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-+                       EGL_NO_CONTEXT);
-+  });
-+  if (acquireFd >= 0) {
-+    EGLint attrs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, acquireFd, EGL_NONE};
-+    EGLSyncKHR sync =
-+        m->createSync(m->display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
-+    if (sync == EGL_NO_SYNC_KHR) {
-+      close(acquireFd);
-+      return nullptr;
-+    }
-+    bool ok = m->waitSync(m->display, sync, 0);
-+    m->destroySync(m->display, sync);
-+    if (!ok) return nullptr;
-+  }
-+  AHardwareBuffer* input = nullptr;
-+  if (m->fAImage_getHardwareBuffer(image, &input) != AMEDIA_OK) return nullptr;
-+  AHardwareBuffer_Desc inputDesc{};
-+  m->fAHardwareBuffer_describe(input, &inputDesc);
++  UniqueFileHandle fence(acquireFd);
++  auto release =
++    MakeScopeExit([&] { m->fAImage_deleteAsync(image, fence.release()); });
++  AHardwareBuffer* buffer = nullptr;
 +  AImageCropRect crop{};
-+  if (m->fAImage_getCropRect(image, &crop) != AMEDIA_OK) return nullptr;
-+  AHardwareBuffer_Desc desc{};
-+  desc.width = aWidth;
-+  desc.height = aHeight;
-+  desc.layers = 1;
-+  desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-+  // CPU access flags request a linear, interoperable RGBA allocation. No lock,
-+  // mapping, pixel upload or readback occurs in this decoder path.
-+  desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
-+               AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-+               AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
-+               AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
-+  Impl::OutputSlot* slot = nullptr;
-+  for (auto& candidate : m->outputs) {
-+    if (!candidate.lastSurface || !candidate.lastSurface->IsGlobalRefSet()) {
-+      slot = &candidate;
-+      break;
-+    }
-+  }
-+  if (!slot) {
-+    // FFmpeg can return a batch larger than the playback queue. Waiting here
-+    // would prevent that same batch from reaching the consumer and releasing
-+    // its images. Retain the observed peak concurrency for subsequent reuse.
-+    m->outputs.emplace_back();
-+    slot = &m->outputs.back();
-+  }
-+  slot->lastSurface = nullptr;
-+  if (slot->buffer &&
-+      (slot->desc.width != desc.width || slot->desc.height != desc.height)) {
-+    m->fAHardwareBuffer_release(slot->buffer);
-+    slot->buffer = nullptr;
-+    slot->fd.reset();
-+  }
-+  if (!slot->buffer) {
-+    if (m->fAHardwareBuffer_allocate(&desc, &slot->buffer)) return nullptr;
-+    m->fAHardwareBuffer_describe(slot->buffer, &slot->desc);
-+    slot->fd.reset(m->ExportFd(slot->buffer));
-+    LOG("Allocated RGBA pool slot {} {}x{}", slot - m->outputs.data(), aWidth,
++  if (m->fAImage_getHardwareBuffer(image, &buffer) != AMEDIA_OK ||
++      m->fAImage_getCropRect(image, &crop) != AMEDIA_OK)
++    return nullptr;
++  auto* layout = m->GetLayout(buffer, acquireFd);
++  if (!layout)
++    return nullptr;
++  if (crop.left % 2 || crop.top % 2 || crop.right - crop.left != aWidth ||
++      crop.bottom - crop.top != aHeight) {
++    LOG("Unsupported crop {} {} {} {} for {}x{}",
++        crop.left,
++        crop.top,
++        crop.right,
++        crop.bottom,
++        aWidth,
 +        aHeight);
-+  }
-+  if (!slot->fd) return nullptr;
-+  AHardwareBuffer* output = slot->buffer;
-+  desc = slot->desc;
-+  EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-+  EGLImageKHR src =
-+      m->createImage(m->display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-+                     m->getClientBuffer(input), imageAttrs);
-+  EGLImageKHR dst =
-+      m->createImage(m->display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-+                     m->getClientBuffer(output), imageAttrs);
-+  auto releaseEGL = MakeScopeExit([&] {
-+    if (src != EGL_NO_IMAGE_KHR) m->destroyImage(m->display, src);
-+    if (dst != EGL_NO_IMAGE_KHR) m->destroyImage(m->display, dst);
-+  });
-+  if (src == EGL_NO_IMAGE_KHR || dst == EGL_NO_IMAGE_KHR) return nullptr;
-+  GLuint textures[2], fbo;
-+  m->fglGenTextures(2, textures);
-+  m->fglGenFramebuffers(1, &fbo);
-+  auto releaseGL = MakeScopeExit([&] {
-+    m->fglDeleteFramebuffers(1, &fbo);
-+    m->fglDeleteTextures(2, textures);
-+  });
-+  m->fglBindTexture(GL_TEXTURE_2D, textures[1]);
-+  m->imageTarget(GL_TEXTURE_2D, dst);
-+  m->fglBindFramebuffer(GL_FRAMEBUFFER, fbo);
-+  m->fglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-+                             GL_TEXTURE_2D, textures[1], 0);
-+  if (m->fglCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-+    return nullptr;
-+  m->fglBindTexture(GL_TEXTURE_EXTERNAL_OES, textures[0]);
-+  m->imageTarget(GL_TEXTURE_EXTERNAL_OES, src);
-+  m->fglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER,
-+                      GL_LINEAR);
-+  m->fglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER,
-+                      GL_LINEAR);
-+  m->fglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S,
-+                      GL_CLAMP_TO_EDGE);
-+  m->fglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T,
-+                      GL_CLAMP_TO_EDGE);
-+  m->fglUseProgram(m->program);
-+  m->fglViewport(0, 0, aWidth, aHeight);
-+  m->fglUniform4f(m->fglGetUniformLocation(m->program, "crop"),
-+                  float(crop.left) / inputDesc.width,
-+                  float(crop.top) / inputDesc.height,
-+                  float(crop.right - crop.left) / inputDesc.width,
-+                  float(crop.bottom - crop.top) / inputDesc.height);
-+  const GLfloat vertices[] = {-1, -1, 1, -1, -1, 1, 1, 1};
-+  m->fglVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, vertices);
-+  m->fglEnableVertexAttribArray(0);
-+  m->fglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-+  EGLSyncKHR sync =
-+      m->createSync(m->display, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
-+  m->fglFlush();
-+  if (sync == EGL_NO_SYNC_KHR) {
-+    // Error teardown must not return an input still sampled by queued commands.
-+    m->fglFinish();
 +    return nullptr;
 +  }
-+  UniqueFileHandle fence(m->dupFence(m->display, sync));
-+  releaseFence = m->dupFence(m->display, sync);
-+  m->destroySync(m->display, sync);
-+  if (!fence || releaseFence < 0) {
-+    m->fglFinish();
-+    return nullptr;
-+  }
-+  if (m->fglGetError() != GL_NO_ERROR) return nullptr;
-+  UniqueFileHandle fd(dup(slot->fd.get()));
-+  if (!fd) {
-+    LOG("RGBA AHardwareBuffer has no dma-buf fd");
-+    return nullptr;
-+  }
-+  // Android RGBA byte order is DRM ABGR8888 on little-endian AArch64.
-+  RefPtr<DMABufSurfaceRGBA> surface = DMABufSurfaceRGBA::CreateFromBuffer(
-+      std::move(fd), std::move(fence), aWidth, aHeight, desc.stride * 4);
-+  slot->lastSurface = surface;
-+  LOG("GPU blit {}x{} stride {} -> DMABuf {}", aWidth, aHeight, desc.stride,
-+      surface->GetUID());
++  uint32_t offsets[2] = {
++    layout->offset[0] + crop.top * layout->stride[0] + crop.left,
++    layout->offset[1] + (crop.top / 2) * layout->stride[1] + crop.left
++  };
++  RefPtr<DMABufSurfaceYUV> surface =
++    DMABufSurfaceYUV::CreateFromNV12(UniqueFileHandle(dup(layout->fd.get())),
++                                     std::move(fence),
++                                     aWidth,
++                                     aHeight,
++                                     layout->stride,
++                                     offsets);
++  surface->SetYUVColorSpace(aColorSpace);
++  surface->SetColorRange(aColorRange);
++  m->leases.push_back({ image, surface });
++  release.release();
++  LOG("Zero-copy NV12 {}x{} inode {} -> DMABuf {} outstanding {}",
++      aWidth,
++      aHeight,
++      layout->inode,
++      surface->GetUID(),
++      m->leases.size());
 +  RefPtr<layers::Image> result = new layers::DMABUFSurfaceImage(surface);
 +  return result.forget();
 +}
-+}  // namespace mozilla
++} // namespace mozilla
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,36 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -888,26 +766,32 @@
 +
 +#include "MediaResult.h"
 +#include "mozilla/UniquePtr.h"
++#include "mozilla/gfx/Types.h"
 +
 +namespace mozilla {
 +namespace layers {
 +class Image;
 +}
 +
-+// NDK Surface output and Android EGL conversion, independent of GeckoView/JNI.
-+class TermuxMediaCodecSurface final {
-+ public:
++// Direct decoder YUV dma-buf output, independent of GeckoView/JNI.
++class TermuxMediaCodecSurface final
++{
++public:
 +  TermuxMediaCodecSurface();
 +  ~TermuxMediaCodecSurface();
 +  MediaResult Init(int aWidth, int aHeight);
 +  void* AcquireWindow();
-+  already_AddRefed<layers::Image> AcquireImage(int aWidth, int aHeight);
++  void ReleaseUnusedImages();
++  already_AddRefed<layers::Image> AcquireImage(int aWidth,
++                                               int aHeight,
++                                               gfx::YUVColorSpace aColorSpace,
++                                               gfx::ColorRange aColorRange);
 +
-+ private:
++private:
 +  struct Impl;
 +  UniquePtr<Impl> m;
 +};
-+}  // namespace mozilla
++} // namespace mozilla
 +#endif
 --- a/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
 +++ b/dom/media/platforms/ffmpeg/ffmpeg62/moz.build
@@ -971,54 +855,112 @@
    releaseTextures.release();
    return true;
  }
-@@ -1324,6 +1326,21 @@
-   const auto& egl = gle->mEgl;
-
-   if (mTexture && mGL->MakeCurrent()) {
-+    if (mGbmBufferFlags & DMABUF_SYNCHRONIZE_READS) {
-+      // Complete submitted texture reads before dropping the global reference
-+      // which permits the external producer to overwrite this allocation.
-+      EGLSync sync = egl->fCreateSyncKHR(LOCAL_EGL_SYNC_FENCE, nullptr);
-+      if (sync) {
-+        mGL->fFlush();
-+        if (egl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER) !=
-+            LOCAL_EGL_CONDITION_SATISFIED) {
-+          mGL->fFinish();
-+        }
-+        egl->fDestroySync(sync);
-+      } else {
-+        mGL->fFinish();
-+      }
-+    }
-     mGL->fDeleteTextures(1, &mTexture);
-     mTexture = 0;
+@@ -1596,12 +1598,50 @@
    }
-@@ -1594,6 +1611,25 @@
-                          << gfx::hexa(mFOURCCFormat);
-       return gfx::SurfaceFormat::UNKNOWN;
-   }
-+}
-+
-+already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateFromBuffer(
-+    UniqueFileHandle aFd, UniqueFileHandle aFence,
-+    int aWidth, int aHeight, uint32_t aStride) {
-+  auto surface = MakeRefPtr<DMABufSurfaceRGBA>();
-+  surface->mWidth = aWidth;
-+  surface->mHeight = aHeight;
-+  surface->mFOURCCFormat = GBM_FORMAT_ABGR8888;
-+  surface->mBufferModifier = DRM_FORMAT_MOD_LINEAR;
-+  surface->mBufferPlaneCount = 1;
-+  surface->mGbmBufferFlags = DMABUF_SYNCHRONIZE_READS;
-+  surface->mDmabufFds[0] = new gfx::FileHandleWrapper(std::move(aFd));
-+  surface->mSyncFd = new gfx::FileHandleWrapper(std::move(aFence));
-+  surface->mStrides[0] = aStride;
-+  surface->mOffsets[0] = 0;
-+  surface->GlobalRefCountCreate();
-+  LogMemoryAddRGBA(surface->GetUID(), surface->GetUsedMemoryRGBA());
-+  return surface.forget();
  }
 
- already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateDMABufSurface(
+-already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceRGBA::CreateDMABufSurface(
+-    mozilla::gl::GLContext* aGLContext, int aWidth, int aHeight,
+-    int aDMABufSurfaceFlags, RefPtr<mozilla::widget::DRMFormat> aFormat) {
++already_AddRefed<DMABufSurfaceYUV>
++DMABufSurfaceYUV::CreateFromNV12(UniqueFileHandle aFd,
++                                 UniqueFileHandle aFence,
++                                 int aWidth,
++                                 int aHeight,
++                                 const uint32_t* aStrides,
++                                 const uint32_t* aOffsets)
++{
++  auto surface = MakeRefPtr<DMABufSurfaceYUV>();
++  surface->mFOURCCFormat = VA_FOURCC_NV12;
++  surface->mBufferPlaneCount = 2;
++  surface->mGbmBufferFlags = DMABUF_SYNCHRONIZE_READS;
++  surface->mWidthAligned[0] = surface->mWidth[0] = aWidth;
++  surface->mHeightAligned[0] = surface->mHeight[0] = aHeight;
++  surface->mWidthAligned[1] = surface->mWidth[1] = (aWidth + 1) / 2;
++  surface->mHeightAligned[1] = surface->mHeight[1] = (aHeight + 1) / 2;
++  surface->mDrmFormats[0] = DRM_FORMAT_R8;
++  surface->mDrmFormats[1] = DRM_FORMAT_GR88;
++  auto fd = MakeRefPtr<gfx::FileHandleWrapper>(std::move(aFd));
++  for (int i = 0; i < 2; ++i) {
++    surface->mDmabufFds[i] = fd;
++    surface->mStrides[i] = aStrides[i];
++    surface->mOffsets[i] = aOffsets[i];
++    surface->mBufferModifiers[i] = DRM_FORMAT_MOD_LINEAR;
++  }
++  if (aFence)
++    surface->mSyncFd = new gfx::FileHandleWrapper(std::move(aFence));
++  surface->GlobalRefCountCreate();
++  LogMemoryAddYUV(surface->GetUID(),
++                  GetUsedMemoryYUV(VA_FOURCC_NV12, aWidth, aHeight));
++  return surface.forget();
++}
++
++already_AddRefed<DMABufSurfaceRGBA>
++DMABufSurfaceRGBA::CreateDMABufSurface(
++  mozilla::gl::GLContext* aGLContext,
++  int aWidth,
++  int aHeight,
++  int aDMABufSurfaceFlags,
++  RefPtr<mozilla::widget::DRMFormat> aFormat)
++{
+   auto surf = MakeRefPtr<DMABufSurfaceRGBA>();
+-  if (!surf->Create(aGLContext, aWidth, aHeight, aDMABufSurfaceFlags,
+-                    aFormat)) {
++  if (!surf->Create(
++        aGLContext, aWidth, aHeight, aDMABufSurfaceFlags, aFormat)) {
+     return nullptr;
+   }
+   return surf.forget();
+@@ -2149,7 +2189,7 @@
+     modifiers.AppendElement(mBufferModifiers[i]);
+   }
+
+-  if (mSync && mSyncFd) {
++  if (mSyncFd) {
+     fenceFDs.AppendElement(WrapNotNull(mSyncFd));
+   }
+
+@@ -2283,6 +2323,7 @@
+   aGLContext->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MIN_FILTER,
+                              LOCAL_GL_LINEAR);
+   aGLContext->fEGLImageTargetTexture2D(LOCAL_GL_TEXTURE_2D, mEGLImage[aPlane]);
++  FenceWait();
+
+   GLenum glErr = aGLContext->fGetError();
+
+@@ -2293,7 +2334,8 @@
+     return true;
+   }
+
+-  if (mBufferModifiers[aPlane] == DRM_FORMAT_MOD_LINEAR &&
++  if (!(mGbmBufferFlags & DMABUF_SYNCHRONIZE_READS) &&
++      mBufferModifiers[aPlane] == DRM_FORMAT_MOD_LINEAR &&
+       GetFOURCCFormat() == VA_FOURCC_NV12 &&
+       CreateTextureViaCopyYUV(aGLContext, aPlane)) {
+     LOGDMABUF("  Plane %d: successfully created texture via copy", aPlane);
+@@ -2413,6 +2455,22 @@
+     return;
+   }
+
++  const auto& consumerEgl = gl::GLContextEGL::Cast(mGL)->mEgl;
++  if (mGbmBufferFlags & DMABUF_SYNCHRONIZE_READS) {
++    // Complete submitted texture reads before dropping the global reference
++    // which permits the external producer to overwrite this allocation.
++    EGLSync sync = consumerEgl->fCreateSyncKHR(LOCAL_EGL_SYNC_FENCE, nullptr);
++    if (sync) {
++      mGL->fFlush();
++      if (consumerEgl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER) !=
++          LOCAL_EGL_CONDITION_SATISFIED) {
++        mGL->fFinish();
++      }
++      consumerEgl->fDestroySync(sync);
++    } else {
++      mGL->fFinish();
++    }
++  }
+   mGL->fDeleteTextures(DMABUF_BUFFER_PLANES, mTexture);
+   std::fill(std::begin(mTexture), std::end(mTexture), 0);
+
 --- a/widget/gtk/DMABufSurface.h
 +++ b/widget/gtk/DMABufSurface.h
 @@ -78,6 +78,8 @@
@@ -1030,13 +972,21 @@
  } DMABufSurfaceFlags;
 
  class DMABufSurfaceRGBA;
-@@ -356,6 +358,9 @@
+@@ -356,6 +358,7 @@
 
  class DMABufSurfaceRGBA final : public DMABufSurface {
   public:
-+  static already_AddRefed<DMABufSurfaceRGBA> CreateFromBuffer(
-+      mozilla::UniqueFileHandle aFd, mozilla::UniqueFileHandle aFence,
-+      int aWidth, int aHeight, uint32_t aStride);
++
    static already_AddRefed<DMABufSurfaceRGBA> CreateDMABufSurface(
        mozilla::gl::GLContext* aGLContext, int aWidth, int aHeight,
        int aDMABufSurfaceFlags = 0,
+@@ -449,6 +452,9 @@
+   DMABufSurfaceYUV(const DMABufSurfaceYUV&) = delete;
+   DMABufSurfaceYUV& operator=(const DMABufSurfaceYUV&) = delete;
+
++  static already_AddRefed<DMABufSurfaceYUV> CreateFromNV12(
++      mozilla::UniqueFileHandle aFd, mozilla::UniqueFileHandle aFence,
++      int aWidth, int aHeight, const uint32_t* aStrides, const uint32_t* aOffsets);
+   static already_AddRefed<DMABufSurfaceYUV> CreateYUVSurface(
+       const VADRMPRIMESurfaceDescriptor& aDesc, int aWidth, int aHeight);
+   static already_AddRefed<DMABufSurfaceYUV> CopyYUVSurface(
