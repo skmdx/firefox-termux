@@ -18,14 +18,15 @@ share/doc/ffmpeg/ffplay*
 share/man/man1/ffplay*
 "
 
+# Shared by configuration and packaging, including incremental (-c) builds.
+# Bump reverse dependencies when these SOVERSIONs change.
+declare -gA _FFMPEG_SOVER=(
+	[avutil]=60
+	[avcodec]=62
+	[avformat]=62
+)
+
 termux_step_pre_configure() {
-	# Do not forget to bump revision of reverse dependencies and rebuild them
-	# after SOVERSION is changed. (These variables are also used afterwards.)
-	declare -gA _FFMPEG_SOVER=(
-		[avutil]=60
-		[avcodec]=62
-		[avformat]=62
-	)
 
 	local lib so_version
 	for lib in util codec format; do
