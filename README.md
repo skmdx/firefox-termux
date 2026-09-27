@@ -1,54 +1,40 @@
-# Termux packages
+# Firefox for Termux:X11 with MediaCodec zero-copy decoding
 
-![GitHub repo size](https://img.shields.io/github/repo-size/termux/termux-packages)
-[![Packages last build status](https://github.com/termux/termux-packages/actions/workflows/packages.yml/badge.svg?branch=master)](https://github.com/termux/termux-packages/actions)
-[![Docker image status](https://github.com/termux/termux-packages/workflows/Docker%20image/badge.svg)](https://hub.docker.com/r/termux/package-builder)
-[![Repology metadata](https://github.com/termux/repology-metadata/workflows/Repology%20metadata/badge.svg)](https://repology.org/repository/termux)
+Termux package recipes and patches for Firefox hardware video decoding through
+Android MediaCodec. Based on [termux/termux-packages](https://github.com/termux/termux-packages),
+with the upstream build infrastructure and history retained.
 
-[![Join the Termux Discord server](https://img.shields.io/discord/641256914684084234.svg?label=&logo=discord&logoColor=ffffff&color=5865F2)](https://discord.gg/HXpF69X)
-[![Join the Termux space on Matrix](https://img.shields.io/badge/Matrix-%E2%80%8B?style=plastic&logo=matrix&logoColor=white&color=green)](https://matrix.to/#/#Termux:matrix.org)
-[![Join the Termux server on Telegram](https://img.shields.io/badge/Telegram-%E2%80%8B?style=plastic&logo=telegram&logoColor=white&color=blue)](https://t.me/termux24x7)
-[![Official subreddit](https://img.shields.io/badge/Reddit-%E2%80%8B?style=plastic&logo=reddit&logoColor=white&color=red)](https://www.reddit.com/r/termux/)
+## Packages
 
-[![Repository status](https://repology.org/badge/repository-big/termux.svg)](https://repology.org/repository/termux)
+- [Firefox 155.0.1-3](x11-packages/firefox): imports decoder NV12 dma-bufs directly
+  into hardware WebRender, without an intermediate RGBA allocation or GPU blit.
+- [FFmpeg 8.1.2-6](packages/ffmpeg): adds the MediaCodec `output_color_format`
+  option required by this Firefox build.
+- [Playback test](x11-packages/firefox/tests/playback.py): real playback, seeking,
+  canvas readback, decoder component identity and direct-import logging.
 
-<img src=".github/static/hosted-by-hetzner.png" alt="Hosted by Hetzner" width="128px"></img>
+Installable aarch64 packages and SHA-256 checksums are available under
+[Releases](https://github.com/skmdx/firefox-termux/releases). Install both packages
+as a pair, after exiting Firefox.
 
-This project contains scripts and patches to build packages for the [Termux](https://github.com/termux/termux-app)
-Android application.
+## Build and runtime
 
-Quick how-to about Termux package management is available at [Package Management](https://github.com/termux/termux-packages/wiki/Package-Management). It also has info on how to fix **`repository is under maintenance or down`** errors when running `apt` or `pkg` commands.
+Use the [Termux package build environment](https://github.com/termux/termux-packages/wiki/Building-packages).
+Build FFmpeg before Firefox. This repository includes both recipes and their patches.
 
-## Contributing
+Direct GPU output requires hardware WebRender and EGL dma-buf import support.
+The preferences `media.ffmpeg.mediacodec.enabled` and
+`media.ffmpeg.mediacodec.surface.enabled` default to true in this build.
+Without hardware WebRender, MediaCodec uses CPU output.
 
-Read [CONTRIBUTING.md](/CONTRIBUTING.md) and [Developer's Wiki](https://github.com/termux/termux-packages/wiki) for more details.
+Tested on Quest 3, Android 14 / API 34, Termux:X11, Mesa 26.2.2 Zink/Turnip
+(Adreno 740): H.264, HEVC, VP9 and AV1 at 1080p60, non-aligned image widths,
+90-second playback and repeated seeking. Surface output is 8-bit NV12,
+including HEVC Main10 input; HDR and preservation of 10-bit output are not validated.
+These results do not establish support on other devices or GPU drivers.
 
-## Community
+## License
 
-The Termux Community docs are available [here](https://github.com/termux/termux-community/blob/site/site/pages/en/index.md).
-
-**All our community members must follow the rules that are defined [here](https://github.com/termux/termux-community/blob/site/site/pages/en/rules/index.md) and any [Content Not Allowed](https://github.com/termux/termux-community/blob/site/site/pages/en/rules/index.md#8-content-not-allowed) must not be posted.**
-##
-
-
-
-## Sponsors and Funders
-
-[<img alt="GitHub Accelerator" width="25%" src="site/assets/sponsors/github.png" />](https://github.com)  
-*[GitHub Accelerator](https://github.com/accelerator) ([1](https://github.blog/2023-04-12-github-accelerator-our-first-cohort-and-whats-next))*
-
-&nbsp;
-
-[<img alt="GitHub Secure Open Source Fund" width="25%" src="site/assets/sponsors/github.png" />](https://github.com)  
-*[GitHub Secure Open Source Fund](https://resources.github.com/github-secure-open-source-fund) ([1](https://github.blog/open-source/maintainers/securing-the-supply-chain-at-scale-starting-with-71-important-open-source-projects), [2](https://termux.dev/en/posts/general/2025/08/11/termux-selected-for-github-secure-open-source-fund-session-2.html))*
-
-&nbsp;
-
-[<img alt="NLnet NGI Mobifree" width="25%" src="site/assets/sponsors/nlnet-ngi-mobifree.png" />](https://nlnet.nl/mobifree)  
-*[NLnet NGI Mobifree](https://nlnet.nl/mobifree) ([1](https://nlnet.nl/news/2024/20241111-NGI-Mobifree-grants.html), [2](https://termux.dev/en/posts/general/2024/11/11/termux-selected-for-nlnet-ngi-mobifree-grant.html))*
-
-&nbsp;
-
-[<img alt="Cloudflare" width="25%" src="site/assets/sponsors/cloudflare.png" />](https://www.cloudflare.com)  
-*[Cloudflare](https://www.cloudflare.com) ([1](https://packages-cf.termux.dev))*
-
+See [LICENSE.md](LICENSE.md) for the packaging repository license.
+Firefox, FFmpeg and other packaged software retain their respective licenses;
+the recipes identify the source releases and licenses.
