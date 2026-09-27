@@ -25,6 +25,17 @@
  }
 
  /* static */
+--- a/dom/media/MediaDecoderStateMachine.cpp
++++ b/dom/media/MediaDecoderStateMachine.cpp
+@@ -4701,6 +4701,8 @@
+         StaticPrefs::media_video_queue_hw_accel_size(), MIN_VIDEO_QUEUE_SIZE);
+     mReader->GetMinVideoQueueSize().apply(
+         [&hw](const uint32_t& x) { hw = std::max(hw, x); });
++    mReader->GetMaxVideoQueueSize().apply(
++        [&hw](const uint32_t& x) { hw = std::min(hw, x); });
+     return hw;
+   } else {
+     // SW decoding is slower and queuing more frames in advance reduces the
 --- a/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 +++ b/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 @@ -58,6 +58,9 @@
