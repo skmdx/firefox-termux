@@ -36,7 +36,9 @@ async function run() {
   const capture=event('seeked'); v.currentTime=4; await capture;
   const c=document.createElement('canvas'); c.width=320;c.height=180;
   c.getContext('2d').drawImage(v,0,0,c.width,c.height);
-  events.push({stage:'capture',...snapshot(),frame:c.toDataURL()});
+  const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+  let lo=255,hi=0; for(let i=0;i<pixels.length;i++)if(i%4!=3){lo=Math.min(lo,pixels[i]);hi=Math.max(hi,pixels[i]);}
+  events.push({stage:'capture',...snapshot(),pixelRange:hi-lo,frame:c.toDataURL()});
   document.querySelector('#status').textContent=JSON.stringify(events,null,2);
   await fetch('/result',{method:'POST',body:JSON.stringify({events})});
 }
@@ -67,6 +69,8 @@ def main():
     parser.add_argument('--video', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--software', action='store_true')
+    parser.add_argument('--cpu-buffer', action='store_true')
+    parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--display', default=':5')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
@@ -134,13 +138,17 @@ def main():
     profile = args.out / 'profile'
     profile.mkdir()
     prefs = {'media.ffmpeg.mediacodec.enabled': not args.software,
+             'media.ffmpeg.mediacodec.surface.enabled': not args.cpu_buffer,
              'media.autoplay.default': 0, 'browser.shell.checkDefaultBrowser': False,
              'browser.startup.homepage_override.mstone': 'ignore',
              'browser.aboutwelcome.enabled': False, 'browser.startup.page': 0,
              'datareporting.policy.firstRunURL': ''}
+    if args.gpu:
+        prefs.update({'gfx.webrender.all': True, 'gfx.webrender.software': False,
+                      'layers.acceleration.force-enabled': True, 'gfx.x11-egl.force-enabled': True})
     (profile/'user.js').write_text(''.join(f'user_pref({json.dumps(k)}, {json.dumps(v)});\n'
                                           for k,v in prefs.items()))
-    env = dict(os.environ, DISPLAY=args.display, MOZ_LOG='FFmpegVideo:5,PlatformDecoderModule:4',
+    env = dict(os.environ, DISPLAY=args.display, MOZ_LOG='FFmpegVideo:5,PlatformDecoderModule:4,TermuxMediaCodec:5,DMABuf:4',
                MOZ_LOG_FILE=str(args.out/'decode.log'))
     x11 = None
     try:
@@ -173,15 +181,20 @@ def main():
         logs = ''.join(p.read_text() for p in args.out.glob('decode.log*'))
         result['mediacodec'] = 'MediaCodec FFmpeg init successful' in logs
         result['software_init'] = 'init, IsHardwareAccelerated=false' in logs
+        result['gpu_frames'] = logs.count('GPU blit ')
         result['copy_log_messages'] = logs.count('Failed to copy image data')
         if 'start' in result and 'end' in result:
             result['playback_cpu_seconds'] = result['end']['cpu_seconds'] - result['start']['cpu_seconds']
             result['playback_wall_seconds'] = result['end']['monotonic'] - result['start']['monotonic']
         result['passed'] = bool(result.get('completed') and not result.get('error')
             and result['mediacodec'] != args.software
+            and (result['software_init'] if args.software else not result['software_init']))
+        result['passed'] = bool(result['passed']
+            and (args.software or args.cpu_buffer or result['gpu_frames'] >= 900)
             and all(e['width'] == 1920 and e['height'] == 1080 and not e['error']
                     for e in result.get('events', []))
-            and result.get('events', [{}])[0].get('decoded', 0) >= 900)
+            and result.get('events', [{}])[0].get('decoded', 0) >= 900
+            and result.get('events', [{}])[-1].get('pixelRange', 0) > 100)
         (args.out/'result.json').write_text(json.dumps(result, indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k != 'events'}))
     if not result['passed']:
