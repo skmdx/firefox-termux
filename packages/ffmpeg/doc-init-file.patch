@@ -1,0 +1,16 @@
+--- a/doc/Makefile
++++ b/doc/Makefile
+@@ -69,11 +69,11 @@
+ ifdef HAVE_MAKEINFO_HTML
+ doc/%.html: doc/%.texi $(SRC_PATH)/doc/t2h.pm $(GENTEXI)
+ 	$(Q)$(TEXIDEP)
+-	$(M)makeinfo --html -I doc --no-split -D config-not-all --init-file=$(SRC_PATH)/doc/t2h.pm --output $@ $<
++	$(M)makeinfo --html -I doc --no-split -D config-not-all --init-file=$(abspath $(SRC_PATH)/doc/t2h.pm) --output $@ $<
+ 
+ doc/%-all.html: doc/%.texi $(SRC_PATH)/doc/t2h.pm $(GENTEXI)
+ 	$(Q)$(TEXIDEP)
+-	$(M)makeinfo --html -I doc --no-split -D config-all --init-file=$(SRC_PATH)/doc/t2h.pm --output $@ $<
++	$(M)makeinfo --html -I doc --no-split -D config-all --init-file=$(abspath $(SRC_PATH)/doc/t2h.pm) --output $@ $<
+ else
+ doc/%.html: doc/%.texi $(SRC_PATH)/doc/t2h.init $(GENTEXI)
+ 	$(Q)$(TEXIDEP)
