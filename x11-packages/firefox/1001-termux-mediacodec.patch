@@ -85,7 +85,7 @@
    }
 
 +#  ifdef MOZ_TERMUX_MEDIACODEC
-+  Unused << InitMediaCodecDecoder();
++  (void)InitMediaCodecDecoder();
 +  return;
 +#  else
 +
