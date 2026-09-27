@@ -25,17 +25,6 @@
  }
 
  /* static */
---- a/dom/media/MediaDecoderStateMachine.cpp
-+++ b/dom/media/MediaDecoderStateMachine.cpp
-@@ -4701,6 +4701,8 @@
-         StaticPrefs::media_video_queue_hw_accel_size(), MIN_VIDEO_QUEUE_SIZE);
-     mReader->GetMinVideoQueueSize().apply(
-         [&hw](const uint32_t& x) { hw = std::max(hw, x); });
-+    mReader->GetMaxVideoQueueSize().apply(
-+        [&hw](const uint32_t& x) { hw = std::min(hw, x); });
-     return hw;
-   } else {
-     // SW decoding is slower and queuing more frames in advance reduces the
 --- a/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 +++ b/dom/media/platforms/ffmpeg/FFmpegDecoderModule.h
 @@ -58,6 +58,9 @@
@@ -150,41 +139,7 @@
  }
  #endif  // MOZ_USE_HWDECODE
 
-@@ -1578,9 +1598,20 @@
-     mShouldResumeDrain = true;
-   }
- #  endif
-+#  ifdef MOZ_TERMUX_MEDIACODEC
-+  bool retryPacket = false;
-+sendPacket:
-+#  endif
-   if (aData || !mHasSentDrainPacket) {
-     packet->duration = aSample->mDuration.ToMicroseconds();
-     int res = mLib->avcodec_send_packet(mCodecContext, packet);
-+#  ifdef MOZ_TERMUX_MEDIACODEC
-+    if (mTermuxSurface && res == AVERROR(EAGAIN)) {
-+      retryPacket = true;
-+      goto receiveFrame;
-+    }
-+    retryPacket = false;
-+#  endif
-     if (res < 0) {
-       // In theory, avcodec_send_packet could sent -EAGAIN should its internal
-       // buffers be full. In practice this can't happen as we only feed one
-@@ -1608,6 +1639,12 @@
-     // draining state.
-     mHasSentDrainPacket = true;
-   }
-+#  ifdef MOZ_TERMUX_MEDIACODEC
-+  if (mTermuxSurface && !aResults.IsEmpty()) {
-+    return aData ? NS_OK : NS_ERROR_NOT_AVAILABLE;
-+  }
-+receiveFrame:
-+#  endif
-   if (aGotFrame) {
-     *aGotFrame = false;
-   }
-@@ -1654,7 +1691,17 @@
+@@ -1654,7 +1674,17 @@
 
      MediaResult rv;
  #  ifdef MOZ_USE_HWDECODE
@@ -203,24 +158,7 @@
  #    ifdef MOZ_WIDGET_GTK
        mDecodeStats.UpdateDecodeTimes(Duration(mFrame));
        if (mDecodeStats.IsDecodingSlow() &&
-@@ -1719,6 +1766,16 @@
-     if (aGotFrame) {
-       *aGotFrame = true;
-     }
-+#  ifdef MOZ_TERMUX_MEDIACODEC
-+    if (mTermuxSurface) {
-+      // Publish each image before decoding another: a batch can exhaust the
-+      // bounded output pool while its images are still held in aResults.
-+      if (retryPacket) {
-+        goto sendPacket;
-+      }
-+      return aData ? NS_OK : NS_ERROR_NOT_AVAILABLE;
-+    }
-+#  endif
-   } while (true);
- #else
-   if (!PrepareFrame()) {
-@@ -1990,6 +2047,19 @@
+@@ -1990,6 +2020,19 @@
    b.mPlanes[0].mSkip = 0;
    b.mPlanes[1].mSkip = 0;
    b.mPlanes[2].mSkip = 0;
@@ -240,29 +178,7 @@
 
    b.mPlanes[0].mWidth = mFrame->width;
    b.mPlanes[0].mHeight = mFrame->height;
-@@ -2470,7 +2540,7 @@
-   return FFmpegDataDecoder::ProcessFlush();
- }
-
--#ifdef MOZ_WIDGET_ANDROID
-+#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
- Maybe<MediaDataDecoder::PropertyValue> FFmpegVideoDecoder<
-     LIBAV_VER>::GetDecodeProperty(MediaDataDecoder::PropertyName aName) const {
-   // If we are using a software decoder, then we aren't subject to platform
-@@ -2484,7 +2554,12 @@
-   }
-
-   // Android has limited amount of output buffers. See Bug 794747.
-+#ifdef MOZ_TERMUX_MEDIACODEC
-+  // Leave room for compositor and IPC references in the four-slot RGBA pool.
-+  static constexpr uint32_t kNumOutputBuffers = 1;
-+#else
-   static constexpr uint32_t kNumOutputBuffers = 3;
-+#endif
-   // SurfaceTexture can have only one current/renderable image at a time.
-   // See Bug 1299068
-   static constexpr uint32_t kNumCurrentImages = 1;
-@@ -2543,6 +2618,8 @@
+@@ -2543,6 +2586,8 @@
  #ifdef MOZ_WIDGET_ANDROID
    mShouldResumeDrain = false;
    ReleaseFramesMediaCodec();
@@ -271,7 +187,7 @@
    if (mMediaCodecDeviceContext) {
      mLib->av_buffer_unref(&mMediaCodecDeviceContext);
    }
-@@ -2561,6 +2638,9 @@
+@@ -2561,6 +2606,9 @@
    // 3. av_buffer_unref(&mVulkanDeviceContext) — may be the last ref and call
    //    vkDestroyDevice, so it must come after Cleanup().
    FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
@@ -281,7 +197,7 @@
  #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
    if (IsHardwareAccelerated()) {
  #  if LIBAVCODEC_VERSION_MAJOR >= 60 && !defined(FFVPX_VERSION)
-@@ -2587,7 +2667,9 @@
+@@ -2587,7 +2635,9 @@
 
  bool FFmpegVideoDecoder<LIBAV_VER>::IsHardwareAccelerated(
      nsACString& aFailureReason) const {
@@ -292,7 +208,7 @@
    return mUsingV4L2 || !!mVAAPIDeviceContext || !!mVulkanDeviceContext;
  #elif defined(MOZ_ENABLE_D3D11VA)
    return !!mD3D11VADeviceContext;
-@@ -3047,15 +3129,20 @@
+@@ -3047,15 +3097,20 @@
  }
  #  endif
 
@@ -313,7 +229,7 @@
 
    if (mInfo.mColorDepth > gfx::ColorDepth::COLOR_10) {
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3087,6 +3174,9 @@
+@@ -3087,6 +3142,9 @@
      if (mMediaCodecDeviceContext) {
        mLib->av_buffer_unref(&mMediaCodecDeviceContext);
      }
@@ -323,7 +239,7 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3192,33 @@
+@@ -3102,6 +3160,33 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
@@ -357,7 +273,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3273,7 @@
+@@ -3156,6 +3241,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -365,7 +281,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3306,30 @@
+@@ -3188,7 +3274,30 @@
    releaseResources.release();
    return NS_OK;
  }
@@ -407,15 +323,6 @@
  namespace layers {
  class AndroidImageReader;
  class BufferRecycleBin;
-@@ -125,7 +126,7 @@
- #endif
-   }
-
--#ifdef MOZ_WIDGET_ANDROID
-+#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_TERMUX_MEDIACODEC)
-   Maybe<MediaDataDecoder::PropertyValue> GetDecodeProperty(
-       MediaDataDecoder::PropertyName aName) const override;
- #endif
 @@ -226,20 +227,28 @@
    std::atomic<uint8_t> mNumOfHWTexturesInUse{0};
  #endif
@@ -449,7 +356,7 @@
    // Only used for the ImageReader case
 --- /dev/null
 +++ b/dom/media/platforms/ffmpeg/TermuxMediaCodecSurface.cpp
-@@ -0,0 +1,498 @@
+@@ -0,0 +1,496 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -468,11 +375,10 @@
 +#include <sys/socket.h>
 +#include <unistd.h>
 +
-+#include <array>
 +#include <chrono>
 +#include <condition_variable>
 +#include <mutex>
-+#include <thread>
++#include <vector>
 +
 +#include "mozilla/Logging.h"
 +#include "mozilla/ScopeExit.h"
@@ -490,35 +396,36 @@
 +  X(AHardwareBuffer_release)  \
 +  X(AHardwareBuffer_describe) \
 +  X(AHardwareBuffer_sendHandleToUnixSocket) X(ANativeWindow_acquire)
-+#define MEDIA_FUNCTIONS(X)                                    \
-+  X(AImageReader_newWithUsage)                                \
-+  X(AImageReader_delete)                                      \
-+  X(AImageReader_getWindow)                                   \
-+  X(AImageReader_setImageListener)                            \
-+  X(AImageReader_acquireNextImageAsync) X(AImage_deleteAsync) \
-+      X(AImage_getHardwareBuffer) X(AImage_getCropRect)
-+#define EGL_FUNCTIONS(X)                                            \
-+  X(eglGetDisplay)                                                  \
-+  X(eglInitialize)                                                  \
-+  X(eglChooseConfig)                                                \
-+  X(eglCreateContext)                                               \
-+  X(eglCreatePbufferSurface) X(eglMakeCurrent) X(eglDestroyContext) \
-+      X(eglDestroySurface) X(eglTerminate) X(eglGetProcAddress) X(eglGetError)
++#define MEDIA_FUNCTIONS(X)              \
++  X(AImageReader_newWithUsage)          \
++  X(AImageReader_delete)                \
++  X(AImageReader_getWindow)             \
++  X(AImageReader_setImageListener)      \
++  X(AImageReader_acquireNextImageAsync) \
++  X(AImage_deleteAsync) X(AImage_getHardwareBuffer) X(AImage_getCropRect)
++#define EGL_FUNCTIONS(X)                                                      \
++  X(eglGetDisplay)                                                            \
++  X(eglInitialize)                                                            \
++  X(eglChooseConfig)                                                          \
++  X(eglCreateContext)                                                         \
++  X(eglCreatePbufferSurface)                                                  \
++  X(eglMakeCurrent) X(eglDestroyContext) X(eglDestroySurface) X(eglTerminate) \
++      X(eglGetProcAddress) X(eglGetError)
 +#define GL_FUNCTIONS(X)                                                      \
 +  X(glGenTextures)                                                           \
 +  X(glBindTexture)                                                           \
 +  X(glTexParameteri)                                                         \
 +  X(glDeleteTextures)                                                        \
-+  X(glGenFramebuffers) X(glBindFramebuffer) X(glFramebufferTexture2D)        \
-+      X(glCheckFramebufferStatus) X(glDeleteFramebuffers) X(glCreateShader)  \
-+          X(glShaderSource) X(glCompileShader) X(glGetShaderiv)              \
-+              X(glDeleteShader) X(glCreateProgram) X(glAttachShader)         \
-+                  X(glBindAttribLocation) X(glLinkProgram) X(glGetProgramiv) \
-+                      X(glDeleteProgram) X(glUseProgram) X(glViewport)       \
-+                          X(glVertexAttribPointer)                           \
-+                              X(glEnableVertexAttribArray) X(glDrawArrays)   \
-+                                  X(glFinish) X(glFlush) X(glGetError)       \
-+                                      X(glGetUniformLocation) X(glUniform4f)
++  X(glGenFramebuffers)                                                       \
++  X(glBindFramebuffer) X(glFramebufferTexture2D) X(glCheckFramebufferStatus) \
++      X(glDeleteFramebuffers) X(glCreateShader) X(glShaderSource)            \
++          X(glCompileShader) X(glGetShaderiv) X(glDeleteShader)              \
++              X(glCreateProgram) X(glAttachShader) X(glBindAttribLocation)   \
++                  X(glLinkProgram) X(glGetProgramiv) X(glDeleteProgram)      \
++                      X(glUseProgram) X(glViewport) X(glVertexAttribPointer) \
++                          X(glEnableVertexAttribArray) X(glDrawArrays)       \
++                              X(glFinish) X(glFlush) X(glGetError)           \
++                                  X(glGetUniformLocation) X(glUniform4f)
 +
 +struct TermuxMediaCodecSurface::Impl {
 +  // Function signatures are explicit because this package targets API 24.
@@ -576,7 +483,7 @@
 +    UniqueFileHandle fd;
 +    RefPtr<DMABufSurfaceRGBA> lastSurface;
 +  };
-+  std::array<OutputSlot, 4> outputs;
++  std::vector<OutputSlot> outputs;
 +
 +  bool Load() {
 +    android = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
@@ -838,20 +745,18 @@
 +               AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
 +               AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
 +  Impl::OutputSlot* slot = nullptr;
-+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-+  do {
-+    for (auto& candidate : m->outputs) {
-+      if (!candidate.lastSurface || !candidate.lastSurface->IsGlobalRefSet()) {
-+        slot = &candidate;
-+        break;
-+      }
++  for (auto& candidate : m->outputs) {
++    if (!candidate.lastSurface || !candidate.lastSurface->IsGlobalRefSet()) {
++      slot = &candidate;
++      break;
 +    }
-+    if (slot) break;
-+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-+  } while (std::chrono::steady_clock::now() < deadline);
++  }
 +  if (!slot) {
-+    LOG("RGBA output pool is still in use");
-+    return nullptr;
++    // FFmpeg can return a batch larger than the playback queue. Waiting here
++    // would prevent that same batch from reaching the consumer and releasing
++    // its images. Retain the observed peak concurrency for subsequent reuse.
++    m->outputs.emplace_back();
++    slot = &m->outputs.back();
 +  }
 +  slot->lastSurface = nullptr;
 +  if (slot->buffer &&
