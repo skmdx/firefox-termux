@@ -36,7 +36,7 @@ async function run() {
   events.push({stage:'replayed',...snapshot()});
   const capture=event('seeked');
   const frameShown=new Promise(resolve=>v.requestVideoFrameCallback((now,metadata)=>resolve(metadata.mediaTime)));
-  v.currentTime=4; await capture; const mediaTime=await frameShown;
+  v.currentTime=CAPTURE_TIME; await capture; const mediaTime=await frameShown;
   const c=document.createElement('canvas'); c.width=320;c.height=180;
   c.getContext('2d').drawImage(v,0,0,c.width,c.height);
   const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
@@ -67,17 +67,29 @@ def stop(process):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        'For GPU tests, set GALLIUM_DRIVER=zink, MESA_LOADER_DRIVER_OVERRIDE=zink, '
+        'and VK_DRIVER_FILES to the device Vulkan ICD. --gpu enables hardware '
+        'WebRender and X11 EGL in the isolated test profile. Fixtures must be '
+        'MP4 with nb_frames metadata and longer than the seek/capture positions.'))
     parser.add_argument('--firefox', type=Path, required=True)
     parser.add_argument('--video', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--software', action='store_true')
     parser.add_argument('--cpu-buffer', action='store_true')
     parser.add_argument('--gpu', action='store_true')
+    parser.add_argument('--expect-cpu', action='store_true', help='Expect automatic CPU output without changing the surface preference')
     parser.add_argument('--display', default=':5')
+    parser.add_argument('--capture-time', type=float, default=4)
     args = parser.parse_args()
+    page = PAGE.replace(b'CAPTURE_TIME', str(args.capture_time).encode())
     args.out.mkdir(parents=True, exist_ok=False)
-    result = {}
+    metadata = json.loads(subprocess.check_output([
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,nb_frames,duration', '-of', 'json',
+        str(args.video)]))['streams'][0]
+    expected_frames = int(metadata['nb_frames'])
+    result = {'video': metadata}
     done = threading.Event()
     browser = None
     ticks = os.sysconf('SC_CLK_TCK')
@@ -117,9 +129,9 @@ def main():
             if self.path == '/':
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
-                self.send_header('Content-Length', str(len(PAGE)))
+                self.send_header('Content-Length', str(len(page)))
                 self.end_headers()
-                self.wfile.write(PAGE)
+                self.wfile.write(page)
             else:
                 self.path = '/' + args.video.name
                 super().do_GET()
@@ -171,7 +183,7 @@ def main():
                                     f'http://127.0.0.1:{server.server_port}/'],
                                    env=env, start_new_session=True,
                                    stdout=(args.out/'browser.log').open('w'), stderr=subprocess.STDOUT)
-        result['completed'] = done.wait(70)
+        result['completed'] = done.wait(float(metadata['duration']) + 55)
         subprocess.run(['import', '-display', args.display, '-window', 'root',
                         str(args.out/'screen.png')], timeout=15, check=True)
     finally:
@@ -197,10 +209,11 @@ def main():
             and result['mediacodec'] != args.software
             and (result['software_init'] if args.software else not result['software_init']))
         result['passed'] = bool(result['passed']
-            and (args.software or args.cpu_buffer or result['gpu_frames'] >= 900)
-            and all(e['width'] == 1920 and e['height'] == 1080 and not e['error']
+            and (args.software or ((args.cpu_buffer or args.expect_cpu) and result['gpu_frames'] == 0)
+                 or (not args.cpu_buffer and not args.expect_cpu and result['gpu_frames'] >= expected_frames))
+            and all(e['width'] == metadata['width'] and e['height'] == metadata['height'] and not e['error']
                     for e in result.get('events', []))
-            and result.get('events', [{}])[0].get('decoded', 0) >= 900
+            and result.get('events', [{}])[0].get('decoded', 0) >= expected_frames
             and result.get('events', [{}])[-1].get('pixelRange', 0) > 100)
         (args.out/'result.json').write_text(json.dumps(result, indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k != 'events'}))
