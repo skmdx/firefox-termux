@@ -272,13 +272,20 @@
    });
 
    FFMPEG_LOG("  creating device context");
-@@ -3102,6 +3164,26 @@
+@@ -3102,6 +3164,33 @@
    AVMediaCodecDeviceContext* mediacodecctx =
        (AVMediaCodecDeviceContext*)hwctx->hwctx;
 
 +#  ifdef MOZ_TERMUX_MEDIACODEC
 +  if (StaticPrefs::media_ffmpeg_mediacodec_surface_enabled() && mImageAllocator &&
 +      mImageAllocator->UsingHardwareWebRender()) {
++    // Android's media libraries also load the system EGL. Resolve Gecko's
++    // Mesa EGL first so snapshot/canvas imports keep dma-buf support.
++    nsCString failureId;
++    if (!gl::GLLibraryEGL::Get(&failureId)) {
++      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
++                         RESULT_DETAIL("Gecko EGL initialization failed"));
++    }
 +    mReleaseMediaCodecBuffer = reinterpret_cast<decltype(mReleaseMediaCodecBuffer)>(
 +        PR_FindSymbol(mLib->mAVCodecLib, "av_mediacodec_release_buffer"));
 +    if (!mReleaseMediaCodecBuffer) {
@@ -299,7 +306,7 @@
    if (XRE_IsGPUProcess() &&
        gfx::gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
      MOZ_ASSERT(!mAndroidImageReader);
-@@ -3156,6 +3238,7 @@
+@@ -3156,6 +3245,7 @@
      mediacodecctx->create_window = 0;  // default -- useful when encoding?
    }
 
@@ -307,7 +314,7 @@
    if (mLib->av_hwdevice_ctx_init(mMediaCodecDeviceContext) < 0) {
      FFMPEG_LOG("  av_hwdevice_ctx_init failed.");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3178,6 +3261,14 @@
+@@ -3178,6 +3268,14 @@
    }
  #  endif
 
@@ -322,7 +329,7 @@
    if (mLib->avcodec_open2(mCodecContext, codec, nullptr) < 0) {
      FFMPEG_LOG("  avcodec_open2 failed for MediaCodec decoder");
      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
-@@ -3188,7 +3279,30 @@
+@@ -3188,7 +3286,30 @@
    releaseResources.release();
    return NS_OK;
  }
